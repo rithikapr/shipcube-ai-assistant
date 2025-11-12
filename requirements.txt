@@ -1,0 +1,5 @@
+Flask>=2.3.2
+transformers>=4.34.0
+torch>=2.2.0
+faiss-cpu>=1.8.0
+python-dotenv>=1.0.0

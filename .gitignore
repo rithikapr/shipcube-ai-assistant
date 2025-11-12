@@ -1,0 +1,19 @@
+# Ignore virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# Environment files
+.env
+
+# Large data/model files
+*.faiss
+*.pkl
+*.json
+*.csv
+*.h5
+*.ckpt
+
+# System files
+.DS_Store
+Thumbs.db
