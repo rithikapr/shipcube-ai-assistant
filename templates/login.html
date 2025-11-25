@@ -1,10 +1,45 @@
 <!doctype html>
-<html><body>
-  <h2>Login (demo)</h2>
-  {% if error %}<p style="color:red">{{ error }}</p>{% endif %}
-  <form method="post">
-    <input name="username" placeholder="username" /><br/>
-    <input name="password" placeholder="password" type="password" /><br/>
-    <button type="submit">Login</button>
-  </form>
-</body></html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Login - ShipCube AI</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <div class="login-wrap">
+    <img src="{{ url_for('static', filename='images/shipcube_logo.png') }}" class="logo-lg" />
+    <h2>{{ 'Register' if mode=='register' else 'Login' }}</h2>
+
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+
+    <form method="post">
+      {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-area">
+          {% for category, msg in messages %}
+            <div class="flash {{ category }}">{{ msg }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% endwith %}
+
+      <label>Username</label>
+      <input name="username" required />
+      <label>Password</label>
+      <input name="password" type="password" required />
+      <div class="row">
+        <button type="submit">{{ 'Sign up' if mode=='register' else 'Login' }}</button>
+      </div>
+
+    </form>
+
+    {% if mode == 'register' %}
+      <p>Already have account? <a href="{{ url_for('login') }}">Login</a></p>
+    {% else %}
+      <p>Need an account? <a href="{{ url_for('register') }}">Sign up</a></p>
+    {% endif %}
+  </div>
+</body>
+</html>

@@ -1,204 +1,81 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>ShipCube AI Assistant</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-  </head>
-  <body>
-    <div class="site">
-      <header class="topbar">
-        <div class="brand">
-          <img src="{{ url_for('static', filename='images/shipcube_logo.png') }}" alt="ShipCube" class="logo"/>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>ShipCube AI</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+  <!-- top bar WITHOUT extra chat box -->
+  <header class="topbar">
+    <img src="{{ url_for('static', filename='images/shipcube_logo.png') }}" class="logo" alt="ShipCube">
+
+    <!-- simple title instead of second input -->
+    <div class="title-area">
+      ShipCube AI — Ask anything about ShipCube.
+    </div>
+
+    <div class="auth-area">
+    {% if user %}
+      <span class="welcome-text">Welcome, <strong>{{ user.username }}</strong> 👋</span>
+      &nbsp; | &nbsp;
+      <a href="{{ url_for('logout') }}">Logout</a>
+    {% else %}
+      <a href="{{ url_for('login') }}">Login</a>
+    {% endif %}
+    </div>
+
+  </header>
+
+  <script>
+    // safely expose JS vars
+    window.SHIPCUBE_USER = JSON.parse("{{ (user is not none) | tojson }}");
+    window.SHIPCUBE_USERNAME = JSON.parse("{{ (user.username if user else None) | tojson }}");
+  </script>
+
+  <div class="layout">
+    <!-- LEFT SIDEBAR -->
+    <aside class="sidebar">
+      <div class="logo-side">
+        <img src="{{ url_for('static', filename='images/shipcube_logo.png') }}" alt="logo">
+      </div>
+
+      <h4>Categories</h4>
+      <button class="category" data-cat="about">ℹ️ About</button>
+      <button class="category" data-cat="warehouse">🏬 Warehouse</button>
+      <button class="category" data-cat="logistics">🚚 Logistics</button>
+      <button class="category" data-cat="storage">📦 Storage</button>
+      <button class="category" data-cat="finance">💰 Finance</button>
+
+      <div class="note">
+        Click a category to browse curated Q&amp;A, or type a question below.
+      </div>
+    </aside>
+
+    <!-- MAIN CHAT COLUMN -->
+    <main class="main-col">
+      <div id="chatWindow" class="chat-window">
+        <div class="welcome">
+          Hi — I am ShipCube AI. Ask me anything.
         </div>
-        <nav class="nav">
-          {% if session.user %}
-            <a href="/dashboard" class="navlink">Dashboard</a>
-            <a href="/logout" class="navlink">Logout</a>
-          {% else %}
-            <a href="/login" class="navlink">Login</a>
-          {% endif %}
-        </nav>
-      </header>
+      </div>
 
-      <main class="main">
-        <aside class="leftcol">
-          <div class="icon-row" role="tablist" aria-label="categories">
-            <button class="icon-btn active" data-icon="about">About</button>
-            <button class="icon-btn" data-icon="warehouse">🏬 Warehouse</button>
-            <button class="icon-btn" data-icon="logistics">🚚 Logistics</button>
-            <button class="icon-btn" data-icon="storage">📦 Storage</button>
-            <button class="icon-btn" data-icon="finance">💰 Finance</button>
-          </div>
-          <p class="hint">Click a category to browse curated Q&A, or type a question below.</p>
-        </aside>
+      <!-- Single composer chat box -->
+      <div class="composer">
+        <textarea id="chatBox" placeholder="Type your question..."></textarea>
+        <button id="sendBtn">Send</button>
+      </div>
+    </main>
 
-        <section class="chat-area">
-          <div id="results" class="results">
-            <div class="welcome-card">
-              <div class="welcome-text">
-                Hi — I am ShipCube AI. Click a category or ask a question to get started.
-              </div>
-            </div>
-          </div>
+    <!-- FAQ COLUMN -->
+    <aside class="faq-col">
+      <h3>FAQ</h3>
+      <div id="faqList" class="faq-list"></div>
+    </aside>
+  </div>
 
-          <div class="composer">
-            <input id="query" class="query" placeholder="Ask ShipCube AI — e.g. 'Who are your partners?'" />
-            <button id="ask-btn" class="ask-btn">Ask</button>
-          </div>
-        </section>
-      </main>
-    </div>
-
-    <!-- full-page loading overlay -->
-    <div id="loading" class="loading-overlay" aria-hidden="true">
-      <div class="spinner" role="status" aria-label="loading"></div>
-      <div class="loading-text">Thinking...</div>
-    </div>
-
-    <script>
-      // Helper: POST JSON to /ask
-      async function askServer(payload) {
-        try {
-          const res = await fetch('/ask', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-          });
-          // if response isn't JSON, capture text (server error)
-          const ct = res.headers.get('content-type') || '';
-          if (!ct.includes('application/json')) {
-            const txt = await res.text();
-            return { ok: false, response: txt };
-          }
-          return await res.json();
-        } catch (err) {
-          return { ok: false, response: String(err) };
-        }
-      }
-
-      // DOM helpers
-      const el = (tag, cls='', text='') => {
-        const e = document.createElement(tag);
-        if (cls) e.className = cls;
-        if (text) e.textContent = text;
-        return e;
-      };
-
-      const resultsEl = document.getElementById('results');
-      const loadingEl = document.getElementById('loading');
-
-      function showLoading(on=true){
-        if(on){
-          loadingEl.classList.add('show');
-          loadingEl.setAttribute('aria-hidden','false');
-        } else {
-          loadingEl.classList.remove('show');
-          loadingEl.setAttribute('aria-hidden','true');
-        }
-      }
-
-      // Render responses (supports many shapes returned by the backend)
-function renderResponse(raw){
-  resultsEl.innerHTML = ''; // clear previous
-
-  // unwrap wrapper { ok: true, response: ... }
-  const resp = (raw && raw.hasOwnProperty('response') && raw.ok !== undefined) ? raw.response : raw;
-
-  // nothing
-  if (!resp) {
-    resultsEl.appendChild(el('div','msg','No response'));
-    return;
-  }
-
-  // If backend returns an object with { hint, items } (category listing)
-  if (typeof resp === 'object' && resp.items && Array.isArray(resp.items)) {
-    if (resp.hint) {
-      const hintCard = el('div','welcome-card');
-      hintCard.appendChild(el('div','welcome-text', resp.hint));
-      resultsEl.appendChild(hintCard);
-    }
-    // Render each item as QA card
-    resp.items.forEach(item => {
-      const card = el('div','qa-card');
-      if (item.question) card.appendChild(el('div','qa-question', item.question));
-      card.appendChild(el('div','qa-answer', item.answer || ''));
-      resultsEl.appendChild(card);
-    });
-    return;
-  }
-
-  // If the response is an array of QA objects
-  if (Array.isArray(resp)) {
-    if (resp.length === 0) {
-      resultsEl.appendChild(el('div','msg','No items found'));
-      return;
-    }
-    resp.slice(0, 20).forEach(item => {
-      const card = el('div','qa-card');
-      if (item.question) card.appendChild(el('div','qa-question', item.question));
-      card.appendChild(el('div','qa-answer', item.answer || ''));
-      resultsEl.appendChild(card);
-    });
-    return;
-  }
-
-  // If string result
-  if (typeof resp === 'string') {
-    const card = el('div','qa-card');
-    card.appendChild(el('div','qa-answer', resp));
-    resultsEl.appendChild(card);
-    return;
-  }
-
-  // If single object {question,answer,source?}
-  if (typeof resp === 'object') {
-    const card = el('div','qa-card');
-    if (resp.question) card.appendChild(el('div','qa-question', resp.question));
-    card.appendChild(el('div','qa-answer', resp.answer || JSON.stringify(resp)));
-    if (resp.source) card.appendChild(el('div','qa-source', 'Source: '+resp.source));
-    resultsEl.appendChild(card);
-    return;
-  }
-
-  // fallback: pretty print
-  resultsEl.appendChild(el('pre','plain-response', JSON.stringify(resp, null, 2)));
-}
-
-
-      // perform query with optional icon
-      async function doQuery({query='', icon=null}){
-        showLoading(true);
-        const payload = { query: query || '', icon: icon || null };
-        const resp = await askServer(payload);
-        showLoading(false);
-        renderResponse(resp);
-      }
-
-      // wire up Ask button + Enter
-      document.getElementById('ask-btn').addEventListener('click', ()=>{
-        const q = document.getElementById('query').value.trim();
-        const active = document.querySelector('.icon-btn.active');
-        const icon = active ? active.dataset.icon : null;
-        doQuery({ query: q, icon });
-      });
-      document.getElementById('query').addEventListener('keydown', (e)=>{
-        if(e.key === 'Enter') document.getElementById('ask-btn').click();
-      });
-
-      // wire icon buttons
-      document.querySelectorAll('.icon-btn').forEach(btn=>{
-        btn.addEventListener('click', async ()=>{
-          document.querySelectorAll('.icon-btn').forEach(b=>b.classList.remove('active'));
-          btn.classList.add('active');
-          const icon = btn.dataset.icon;
-          // if there is text in query, pass both (category-restricted search),
-          // otherwise return curated list of QAs for that icon.
-          const q = document.getElementById('query').value.trim();
-          doQuery({ query: q, icon });
-        });
-      });
-    </script>
-  </body>
+  <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+</body>
 </html>

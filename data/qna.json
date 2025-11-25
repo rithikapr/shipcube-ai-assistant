@@ -14,14 +14,14 @@
   {
     "question": "What is shipcube?",
     "answer": "ShipCube is a leading global warehousing and logistics service provider, offering reliable and efficient storage and distribution solutions worldwide.",
-    "tag": "warehouse",
-    "context": "warehouse"
+    "tag": "about",
+    "context": "about"
   },
   {
     "question": "What services does ShipCube provide?",
     "answer": "ShipCube provides a range of services including Third-Party Logistics (3PL), Strategic Warehousing Facilities, and Logistics Hub Management Centers.",
-    "tag": "warehouse",
-    "context": "warehouse"
+    "tag": "about",
+    "context": "about"
   },
   {
     "question": "What types of fulfillment services does ShipCube handle?",
@@ -54,7 +54,7 @@
     "context": "about"
   },
   {
-    "question": "What you covered say goodbye to logistics worries?",
+    "question": "What service you provide to say goodbye to logistics worries?",
     "answer": "ShipCube offers comprehensive solutions including Delivery, Fulfillment, Seamless Integration, Dedicated Account Management, Real-Time Inventory Tracking, Kitting & Assembly, and Order Tracking — ensuring a smooth and efficient logistics experience. \"",
     "tag": "logistics",
     "context": "logistics"
@@ -62,8 +62,8 @@
   {
     "question": "In which cities are ShipCube’s warehouses located?",
     "answer": "ShipCube's warehouses are located in New Jersey, Pennsylvania, California, Texas, and the United Arab Emirates (UAE).",
-    "tag": "warehouse",
-    "context": "warehouse"
+    "tag": "about",
+    "context": "about"
   },
   {
     "question": "How many customers does ShipCube have?",
