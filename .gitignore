@@ -1,19 +1,19 @@
-# Ignore virtual environment
+# Python
 venv/
 __pycache__/
 *.pyc
 
-# Environment files
+# Local data / DBs
+data/shipcube.db
+data/*.db
+data/global_kb/
+data/doc_kb/
+data/pdfs/
+*.log
+
+# Prometheus & monitoring data
+prometheus/
+grafana/
+
+# Env secrets
 .env
-
-# Large data/model files
-*.faiss
-*.pkl
-*.json
-*.csv
-*.h5
-*.ckpt
-
-# System files
-.DS_Store
-Thumbs.db
