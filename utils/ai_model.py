@@ -8,10 +8,13 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from langchain_community.vectorstores import FAISS as LCFAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
 import os
-import ollama 
+import re
+# import ollama 
 
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:0.5b")
+# OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:0.5b")
+GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash-lite")
 # ---------------------------------------------------------------------
 # Paths & constants
 # ---------------------------------------------------------------------
@@ -25,7 +28,7 @@ QNA_INDEX_PATH = DATA_DIR / "qna.faiss.index"
 #DOC_KB_DIR = DATA_DIR / "doc_kb"          # (you can delete this if unused)
 GLOBAL_KB_DIR = DATA_DIR / "global_kb"    # NEW unified KB from build_global_kb.py
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+MODEL_NAME = "sentence-transformers/all-mpnet-base-v2"
 
 # ---------------------------------------------------------------------
 # Global lazy-loaded objects
@@ -36,6 +39,7 @@ _global_vectordb: Optional[LCFAISS] = None  # NEW
 _model: Optional[SentenceTransformer] = None
 _qna_index = None
 _qna_embeddings = None
+_llm: Optional[ChatGoogleGenerativeAI] = None
 QNA: List[Dict] = []  # exported for other modules
 
 
@@ -57,6 +61,15 @@ def _ensure_model():
         _model = SentenceTransformer(MODEL_NAME)
     return _model
 
+def _ensure_llm() -> ChatGoogleGenerativeAI:
+    global _llm
+    if _llm is None:
+        _llm = ChatGoogleGenerativeAI(
+            model=GEMINI_MODEL_NAME,
+            temperature=0.2,      
+            max_output_tokens=512, 
+        )
+    return _llm
 
 def _ensure_qna_loaded():
     """Load QNA JSON + FAISS index only once."""
@@ -358,11 +371,13 @@ def get_retrieval_answer(
 
 def get_ai_response(prompt: str) -> str:
     """
-    Generate a reply using a local LLaMA model via Ollama.
+    Generate a reply using a Gemini based API.
     This is used both for:
       - summarising PDF doc_kb chunks (RAG)
       - pure generative fallback answers
     """
+    llm = _ensure_llm()
+
     messages = [
         {
             "role": "system",
@@ -370,22 +385,149 @@ def get_ai_response(prompt: str) -> str:
                 "You are ShipCube AI, a helpful logistics and 3PL assistant. "
                 "Answer clearly and concisely. If you are given a 'Context:' "
                 "section, you MUST base your answer only on that context."
+                "Make sure to concise the response and make it presentable."
             ),
         },
         {"role": "user", "content": prompt},
     ]
 
+    system_msg = ""
+    user_msg = ""
+
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "system":
+            system_msg = content
+        elif role == "user":
+            user_msg = content
+
+    full_prompt = (system_msg + "\n\n" if system_msg else "") + user_msg
+
     try:
-        res = ollama.chat(
-            model=OLLAMA_MODEL,
-            messages=messages,
-            stream=False,
-        )
-        content = res.get("message", {}).get("content", "").strip()
+        res = llm.invoke(full_prompt)
+        content = (res.content or "").strip()
         if not content:
-            return "I couldn't understand that — could you please rephrase or ask a more specific question?"
+            return (
+                "I couldn't understand that — could you please rephrase or "
+                "ask a more specific question?"
+            )
         return content
     except Exception as e:
         # Log the error so you can see it in the Flask console
-        print("[ollama] generation error:", e)
+        print("[genai] generation error:", e)
         return "Sorry, the model couldn't produce a useful answer right now."
+    
+
+def generate_answer_from_retrieval(
+    query: str,
+    top_k: int = 5,
+    score_threshold: float = 0.2,
+    max_context_tokens: int = 1500,
+    concise_word_limit: int = 70,
+) -> Dict:
+    """
+    High-level wrapper: run retrieval -> make a concise prompt -> call LLM -> return structured response.
+
+    Returns a dict:
+      {
+        "query": str,
+        "answer": str,
+        "sources": [ {"source": str, "score": float, "snippet": str}, ... ],
+        "used_context": str  # truncated context sent to the LLM
+      }
+
+    Notes:
+    - max_context_tokens is a heuristic (not exact). We convert tokens -> chars by factor ~4 to avoid extremely long prompts.
+    - The LLM is asked to be concise and to cite sources like [1], [2].
+    """
+    # 1) Retrieval
+    hits = get_retrieval_answer(query, top_k=top_k, score_threshold=score_threshold)
+    if not hits:
+        # fallback behavior
+        prompt_noctx = (
+            "Context:\n\n"
+            "User question: {}\n\n"
+            "Instructions: You do NOT have context. Answer concisely and clearly. "
+            "If you don't know, say 'I don't know' or ask for clarification.".format(query)
+        )
+        ans = get_ai_response(prompt_noctx)
+        return {"query": query, "answer": ans, "sources": [], "used_context": ""}
+
+    # 2) Prepare source list and numbered citations
+    # We'll number the hits [1], [2], ... in order of descending score
+    sources = []
+    for i, h in enumerate(hits, start=1):
+        snippet = h.get("answer", "").strip()
+        # Keep a short snippet for the final output
+        snippet_short = snippet if len(snippet) <= 300 else snippet[:300].rsplit(" ", 1)[0] + "..."
+        sources.append(
+            {
+                "id": i,
+                "source": h.get("source", "unknown"),
+                "score": float(h.get("score", 0.0)),
+                "snippet": snippet_short,
+            }
+        )
+
+    # 3) Build Context text: numbered entries like [1] Source: ... \n<text>
+    # Heuristic truncation: limit total context characters to avoid long prompts
+    # (approx token -> char conversion factor = 4)
+    max_chars = max_context_tokens * 4
+    context_parts = []
+    chars_used = 0
+    for s in sources:
+        # find the full original chunk text from hits by matching source+score (safe enough)
+        # We'll produce a compact block for each hit.
+        idx = s["id"] - 1
+        full_text = (hits[idx].get("answer") or "").strip()
+        header = f"[{s['id']}] Source: {s['source']} (score={s['score']:.3f})\n"
+        block = header + full_text + "\n\n"
+        if chars_used + len(block) > max_chars:
+            # truncate this block to fit remaining chars (leave room for ellipsis)
+            remaining = max(0, max_chars - chars_used - 10)
+            if remaining <= 0:
+                break
+            snippet = full_text[:remaining].rsplit(" ", 1)[0]
+            block = header + snippet + "...\n\n"
+            context_parts.append(block)
+            chars_used += len(block)
+            break
+        context_parts.append(block)
+        chars_used += len(block)
+
+    context_text = "".join(context_parts).strip()
+
+    # 4) Build the final prompt we send to get_ai_response
+    # Request: concise, clear, cite the numbered sources like [1], [2], and keep length <= concise_word_limit words.
+    prompt = (
+        "Context:\n\n"
+        f"{context_text}\n\n"
+        "User question:\n"
+        f"{query}\n\n"
+        "Instructions:\n"
+        "- Base your answer ONLY on the Context above.\n"
+        f"- Keep the answer concise and clear (around {concise_word_limit} words or less).\n"
+        "- If the user query is very general, like a friendly talk, reply as you are a assistant working in Shipcube."
+        "- If the context doesn't contain enough info to answer, say \"I don't know\" and list the most relevant sources.\n"
+        "- Provide a 1-2 sentence actionable answer.\n"
+    )
+
+    # 5) Call the LLM
+    answer = get_ai_response(prompt)
+
+    cited_ids = re.findall(r"\[(\d+)\]", answer)
+    cited_ids = sorted(set(int(x) for x in cited_ids if x.isdigit()))
+
+    cited_sources = [s for s in sources if s["id"] in cited_ids]
+    if not cited_sources:
+        # If LLM didn't cite, include top 1-2 sources by default
+        cited_sources = sources[: min(2, len(sources))]
+
+    return {
+        "query": query,
+        "answer": answer,
+        "sources": cited_sources,
+        "used_context": context_text,
+    }
+

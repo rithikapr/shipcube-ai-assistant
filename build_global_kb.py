@@ -8,10 +8,11 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 import json
+import re
 
 PDF_DIR = Path("data/pdfs")
 KB_DIR = Path("data/global_kb")   # NEW: unified index
-EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+EMBED_MODEL_NAME = "all-mpnet-base-v2"
 QNA_JSON = Path("data/qna.json")
 
 def load_qna_docs_from_json():
@@ -45,6 +46,37 @@ def load_qna_docs_from_json():
     return docs
 
 
+PAGE_FOOTER_RE = re.compile(
+    r"^\d+\s+\|\s+Warehouse Management: A Complete Guide for Retailers",
+    re.IGNORECASE,
+)
+SEE_ALSO_RE = re.compile(r"^SEE ALSO:", re.IGNORECASE)
+
+def clean_page_text(text: str) -> str:
+    lines = text.splitlines()
+    kept: list[str] = []
+
+    for line in lines:
+        s = line.strip()
+        if not s: 
+            continue
+        if PAGE_FOOTER_RE.match(s):
+            continue
+        if SEE_ALSO_RE.match(s):
+            continue
+
+        kept.append(s)
+    
+    cleaned = " ".join(kept)
+    return cleaned.strip()
+
+
+def clean_docs(docs: list[Document]) -> list[Document]:
+    for page in docs:
+        page.page_content = clean_page_text(page.page_content)
+    return docs
+
+
 def load_all_pdfs(pdf_dir: Path):
     docs = []
     for pdf_path in pdf_dir.glob("*.pdf"):
@@ -56,6 +88,7 @@ def load_all_pdfs(pdf_dir: Path):
             d.metadata.setdefault("source_file", pdf_path.name)
         docs.extend(pdf_docs)
     print(f"Total PDF pages loaded: {len(docs)}")
+    docs = clean_docs(docs)
     return docs
 
 
@@ -65,6 +98,7 @@ def main():
 
     # 1. Load sources
     raw_pdf_docs = load_all_pdfs(PDF_DIR)          # pages from all PDFs
+    # print(raw_pdf_docs)
     faq_docs = load_qna_docs_from_json()           # curated FAQ from qna.json
 
     if not raw_pdf_docs and not faq_docs:
