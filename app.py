@@ -10,7 +10,7 @@ from flask import (
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 #from utils.ai_model import get_ai_response,  QNA
-from utils.ai_model import get_ai_response, get_retrieval_answer, get_top_faq, get_items_for_tag
+from utils.ai_model import get_ai_response, get_retrieval_answer, get_top_faq, get_items_for_tag, generate_answer_from_retrieval
 from langchain_community.vectorstores import FAISS as LCFAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -510,30 +510,34 @@ def ask():
     # ---------- END ORDER HANDLING ----------
 
     # ---------- GLOBAL RAG + LLM ----------
-    retrieval_hits = []
     try:
-        retrieval_hits = get_retrieval_answer(
+        rag_res = generate_answer_from_retrieval(
             query,
             top_k=3,
             score_threshold=0.25,
-            tag=(icon or None)
         )
     except Exception as e:
-        print("Retrieval error:", e)
+        print("RAG generation error:", e)
+        rag_res = None
 
-    if retrieval_hits:
-        top = retrieval_hits[0]
-        answer_text = top.get('answer') or top.get('content') or "No exact answer found."
-        src = top.get('source') or top.get('metadata', {}).get('source', 'global_kb')
+    if rag_res and rag_res.get("answer"):
+        answer_text = rag_res["answer"]
+        # build a compact source string for client display
+        src_list = [
+            f"{s['source']} (id={s['id']}, score={s['score']:.3f})"
+            for s in rag_res.get("sources", [])
+        ]
+        src_str = ", ".join(src_list) if src_list else "global_kb"
         append_chat_to_history('assistant', answer_text, user_session)
         return jsonify({
             'ok': True,
             'response': {
-                'question': top.get('question') or query,
+                'question': query,
                 'answer': answer_text,
-                'source': src
+                'source': src_str,
             }
         })
+
 
     # Fallback to LLM
     ai_resp = get_ai_response(query)
