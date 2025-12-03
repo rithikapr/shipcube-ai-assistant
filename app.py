@@ -6,7 +6,8 @@ import time
 from pathlib import Path
 from flask import (
     Flask, render_template, request, jsonify,
-    session, redirect, url_for, g, flash
+    session, redirect, url_for, g, flash,
+    send_from_directory, abort, make_response
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 #from utils.ai_model import get_ai_response,  QNA
@@ -564,6 +565,19 @@ def ask():
 @app.route("/metrics")
 def metrics():
     return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
+
+@app.route('/invoice')
+def invoice():
+    user = session.get('user')
+    if not user:
+        flash("Please log in to access invoices.", "warning")
+        return redirect(url_for('login'))
+    
+
+    #TODO: Placeholder page – Priyanka will implement logic here later to download page
+
+    return render_template('invoice.html', user=user)
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
