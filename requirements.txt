@@ -11,3 +11,6 @@ langchain-community
 pypdf 
 langchain-huggingface
 prometheus-client
+
+# Create User
+werkzeug
