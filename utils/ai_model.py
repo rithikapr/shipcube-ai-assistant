@@ -419,6 +419,50 @@ def get_ai_response(prompt: str) -> str:
         return "Sorry, the model couldn't produce a useful answer right now."
     
 
+def summarise_context(context: str) -> str:
+    llm = _ensure_llm()
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert summarizer. I need to pass this to a RAG model, so context is required."
+                "Summarize the given context in less than 100 words. If context is too large, trim from the earlier context, that is, the lines from the start."
+                "Summarize as you store context information for your user for a chat."
+                "Don't add anything extra than the context like I can do this or that. If no context, leave blank response"
+            ),
+        },
+        {"role": "user", "content": context},
+    ]
+
+    system_msg = ""
+    user_msg = ""
+
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "system":
+            system_msg = content
+        elif role == "user":
+            user_msg = content
+
+    full_prompt = (system_msg + "\n\n" if system_msg else "") + user_msg
+
+    try:
+        res = llm.invoke(full_prompt)
+        content = (res.content or "").strip()
+        if not content:
+            return (
+                "I couldn't understand that — could you please rephrase or "
+                "ask a more specific question?"
+            )
+        return content
+    except Exception as e:
+        # Log the error so you can see it in the Flask console
+        print("[genai] summarization error:", e)
+        return "Sorry, the model couldn't produce a useful answer right now."
+    
+
 def generate_answer_from_retrieval(
     query: str,
     top_k: int = 5,

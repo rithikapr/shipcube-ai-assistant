@@ -10,7 +10,7 @@ from flask import (
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 #from utils.ai_model import get_ai_response,  QNA
-from utils.ai_model import get_ai_response, get_retrieval_answer, get_top_faq, get_items_for_tag, generate_answer_from_retrieval
+from utils.ai_model import get_ai_response, get_retrieval_answer, get_top_faq, get_items_for_tag, generate_answer_from_retrieval, summarise_context
 from langchain_community.vectorstores import FAISS as LCFAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -40,6 +40,8 @@ ASK_REQUESTS = Counter(
     "ask_requests_total",
     "Total /ask endpoint calls"
 )
+
+history = ""
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 app.secret_key = os.environ.get('FLASK_SECRET', 'shipcube_dev_secret')
@@ -509,8 +511,14 @@ def ask():
             })
     # ---------- END ORDER HANDLING ----------
 
+    if 'history' not in locals():
+        history = ""
+
     # ---------- GLOBAL RAG + LLM ----------
     try:
+        history = summarise_context(history)
+        query = query + " \n Context: " + history
+        print(query)
         rag_res = generate_answer_from_retrieval(
             query,
             top_k=3,
@@ -529,6 +537,7 @@ def ask():
         ]
         src_str = ", ".join(src_list) if src_list else "global_kb"
         append_chat_to_history('assistant', answer_text, user_session)
+        history += " \n " + answer_text
         return jsonify({
             'ok': True,
             'response': {
@@ -542,6 +551,7 @@ def ask():
     # Fallback to LLM
     ai_resp = get_ai_response(query)
     append_chat_to_history('assistant', ai_resp, user_session)
+    history = history + " \n " + answer_text
     return jsonify({
         'ok': True,
         'response': {
