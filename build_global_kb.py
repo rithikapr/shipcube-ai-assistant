@@ -1,19 +1,20 @@
-# build_global_kb.py  (new file – you can reuse the old name if you like)
-
+# build_global_kb.py
 import os
+import re
+import json
 from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
-import json
 
 PDF_DIR = Path("data/pdfs")
-KB_DIR = Path("data/global_kb")   # NEW: unified index
-EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+KB_DIR = Path("data/global_kb")   # unified index (PDF + FAQ)
 QNA_JSON = Path("data/qna.json")
+EMBED_MODEL_NAME = "all-mpnet-base-v2"
 
+# ------------------ FAQ loader (your improved version) ------------------ #
 def load_qna_docs_from_json():
     """Load data/qna.json and convert each item to a short Document."""
     if not QNA_JSON.exists():
@@ -25,8 +26,9 @@ def load_qna_docs_from_json():
 
     docs = []
     for item in qna_list:
-        q = (item.get("question") or "").strip()
-        a = (item.get("answer") or "").strip()
+        # support both "question"/"answer" and "Question"/"Answer"
+        q = (item.get("question") or item.get("Question") or "").strip()
+        a = (item.get("answer") or item.get("Answer") or "").strip()
         if not q or not a:
             continue
 
@@ -37,6 +39,13 @@ def load_qna_docs_from_json():
                 metadata={
                     "source": "faq",
                     "question": q,
+                    # so we can filter/gate later
+                    "department": item.get("Departments"),
+                    "requires_login": bool(
+                        item.get("RequiresLogin")
+                        or item.get("requires_login")
+                        or False
+                    ),
                 },
             )
         )
@@ -44,6 +53,42 @@ def load_qna_docs_from_json():
     print(f"[faq] Loaded {len(docs)} FAQ docs from qna.json")
     return docs
 
+# ------------------ PDF cleaning  ------------------ #
+
+PAGE_FOOTER_RE = re.compile(
+    r"^\d+\s+\|\s+Warehouse Management: A Complete Guide for Retailers",
+    re.IGNORECASE,
+)
+SEE_ALSO_RE = re.compile(r"^SEE ALSO:", re.IGNORECASE)
+
+
+def clean_page_text(text: str) -> str:
+    """
+    Remove page footers, 'SEE ALSO' blocks etc. from a raw PDF page text.
+    """
+    lines = text.splitlines()
+    kept: list[str] = []
+
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        # Skip known footer/header patterns
+        if PAGE_FOOTER_RE.match(s):
+            continue
+        if SEE_ALSO_RE.match(s):
+            continue
+
+        kept.append(s)
+
+    cleaned = " ".join(kept)
+    return cleaned.strip()
+
+def clean_docs(docs: list[Document]) -> list[Document]:
+    """Clean all PDF page documents in-place and return them."""
+    for page in docs:
+        page.page_content = clean_page_text(page.page_content)
+    return docs
 
 def load_all_pdfs(pdf_dir: Path):
     docs = []
@@ -55,10 +100,13 @@ def load_all_pdfs(pdf_dir: Path):
             d.metadata.setdefault("source_type", "pdf")
             d.metadata.setdefault("source_file", pdf_path.name)
         docs.extend(pdf_docs)
-    print(f"Total PDF pages loaded: {len(docs)}")
+
+    print(f"Total PDF pages loaded (before clean): {len(docs)}")
+    docs = clean_docs(docs)
+    print(f"Total PDF pages after cleaning: {len(docs)}")
     return docs
 
-
+# ------------------ Main KB build ------------------ #
 def main():
     PDF_DIR.mkdir(parents=True, exist_ok=True)
     KB_DIR.mkdir(parents=True, exist_ok=True)
@@ -85,7 +133,6 @@ def main():
     cleaned_chunks = []
     for d in pdf_chunks:
         text = d.page_content.strip()
-        # Skip if it's too short or only a few words (tune these thresholds as you like)
         if len(text) < 40 or len(text.split()) < 5:
             continue
         cleaned_chunks.append(d)
@@ -106,8 +153,6 @@ def main():
     print(f"[save] Saving vector store to {KB_DIR}")
     vectordb.save_local(str(KB_DIR))
     print("[kb] Done.")
-   
-    
 
 if __name__ == "__main__":
     main()

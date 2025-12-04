@@ -8,9 +8,10 @@ from flask import (
     Flask, render_template, request, jsonify,
     session, redirect, url_for, g, flash
 )
+from typing import List, Dict, Optional
 from werkzeug.security import generate_password_hash, check_password_hash
-#from utils.ai_model import get_ai_response,  QNA
-from utils.ai_model import get_ai_response, get_retrieval_answer, get_top_faq, get_items_for_tag
+from utils.ai_model import (get_ai_response,get_retrieval_answer,get_top_faq,
+get_items_for_tag, generate_answer_from_retrieval)
 from langchain_community.vectorstores import FAISS as LCFAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -44,6 +45,7 @@ ASK_REQUESTS = Counter(
 app = Flask(__name__, static_folder='static', template_folder='templates')
 app.secret_key = os.environ.get('FLASK_SECRET', 'shipcube_dev_secret')
 
+
 # --- DB helpers --------------------------------------------------------------
 def get_db():
     db = getattr(g, '_database', None)
@@ -52,7 +54,6 @@ def get_db():
         db = g._database = sqlite3.connect(DB_PATH, check_same_thread=False)
         db.row_factory = sqlite3.Row
     return db
-
 
 def init_db():
     db = get_db()
@@ -104,13 +105,16 @@ def close_connection(exception):
     if db is not None:
         db.close()
 
+
 # initialize DB at start
 with app.app_context():
     init_db()
 
+
 # --- NEW: load PDF doc_kb FAISS index once ----------------------------------
 DOC_KB_STORE = None
 DOC_KB_READY = False
+
 
 def load_doc_kb():
     """Load LangChain FAISS doc_kb index from disk."""
@@ -178,7 +182,6 @@ def build_doc_kb_answer(query: str):
     if not hits:
         return None, None
 
-    # you can play with score thresholds later
     # For now we just use the top 2 chunks.
     top_chunks = hits[:2]
     context_parts = []
@@ -204,13 +207,12 @@ def build_doc_kb_answer(query: str):
         print("[doc_kb] get_ai_response error:", e)
         return None, None
 
-    # join sources (de-duplicate)
     sources_str = ", ".join(sorted(set(sources)))
     return answer, sources_str
 
+
 @app.before_request
 def start_timer():
-    # store start time on Flask's `g` object
     g.start_time = time.time()
 
 
@@ -231,6 +233,7 @@ def record_request_data(response):
         print("Metrics error:", e)
     return response
 
+
 # --- auth routes ------------------------------------------------------------
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -248,7 +251,6 @@ def register():
                 (username, generate_password_hash(password))
             )
             db.commit()
-            # ✅ show success message on login page
             flash('Account created successfully. Please log in.', 'success')
             return redirect(url_for('login'))
         except sqlite3.IntegrityError:
@@ -326,18 +328,14 @@ def find_order_in_db(token: str):
     db = get_db()
     t = (token or "").strip()
 
-    # Build variants to handle things like "219195797" vs "219195797.0"
     variants = {t}
 
     if re.fullmatch(r"\d+", t):
-        # pure digits in query, but DB often has ".0"
         variants.add(f"{t}.0")
     elif re.fullmatch(r"\d+\.0", t):
-        # query has ".0", DB may have plain integer
         variants.add(t.split(".")[0])
 
     var_list = list(variants)
-    # Ensure we always have 2 elements for the IN (?, ?) placeholders
     while len(var_list) < 2:
         var_list.append(var_list[0])
 
@@ -365,14 +363,15 @@ def find_order_in_db(token: str):
     row = db.execute(
         q,
         (
-            var_list[0], var_list[1],   # order_id variants
-            var_list[0], var_list[1],   # store_orderid variants
-            t,                          # tracking_id exact
-            t,                          # invoice_number exact
+            var_list[0], var_list[1],
+            var_list[0], var_list[1],
+            t,
+            t,
         ),
     ).fetchone()
 
     return dict(row) if row else None
+
 
 # --- main app endpoints -----------------------------------------------------
 @app.route('/')
@@ -380,52 +379,87 @@ def index():
     user = session.get('user')
     return render_template('index.html', user=user)
 
+
 @app.route('/history', methods=['GET'])
 def history():
     return jsonify({'ok': True, 'history': get_history_for_current_user()})
 
-@app.route("/faq/top", methods=["GET"])
-# def faq_top():
-#     """
-#     Return 5–6 top FAQ Q&As for the right-hand pane.
-#     Non-category specific, just a small curated list from QNA.
-#     """
-#     items = []
-#     try:
-#         if isinstance(QNA, list):
-#             for q in QNA[:6]:
-#                 items.append({
-#                     "question": q.get("question", ""),
-#                     "answer": q.get("answer", ""),
-#                 })
-#     except Exception as e:
-#         print("faq_top error:", e)
-#     return jsonify({"ok": True, "items": items})
+
 @app.route("/faq/top", methods=["GET"])
 def faq_top():
+    user = session.get('user')
+    is_logged_in = user is not None
+
     items = []
     try:
         for q in get_top_faq(6):
+            question = q.get("question") or q.get("Question") or ""
+            ans = q.get("answer") or q.get("Answer") or ""
+
+            dept = (
+                q.get("Departments")
+                or q.get("department")
+                or q.get("tag")
+                or q.get("context")
+                or ""
+            ).strip().lower()
+
+            requires_login = bool(
+                q.get("RequiresLogin") or q.get("requires_login")
+            )
+
+            if not is_logged_in and requires_login:
+                ans = (
+                    "This answer contains detailed pricing information. "
+                    "Please create an account and log in to view the exact rates."
+                )
+
             items.append({
-                "question": q.get("question", ""),
-                "answer": q.get("answer", ""),
+                "question": question,
+                "answer": ans,
             })
     except Exception as e:
         print("faq_top error:", e)
     return jsonify({"ok": True, "items": items})
 
+
 @app.route("/faq/<tag>", methods=["GET"])
 def faq_by_tag(tag):
     """
-    Return FAQ items filtered by tag (about, warehouse, logistics, storage, finance).
+    Return FAQ items filtered by category.
+    Category comes from the Departments field in qna.json.
     """
+    user = session.get('user')
+    is_logged_in = user is not None
+
     items = []
     try:
         faqs = get_items_for_tag(tag, limit=10)
         for q in faqs:
+            question = q.get("question") or q.get("Question") or ""
+            ans = q.get("answer") or q.get("Answer") or ""
+
+            dept = (
+                q.get("Departments")
+                or q.get("department")
+                or q.get("tag")
+                or q.get("context")
+                or ""
+            ).strip().lower()
+
+            requires_login = bool(
+                q.get("RequiresLogin") or q.get("requires_login")
+            )
+
+            if not is_logged_in and requires_login:
+                ans = (
+                    "This FAQ includes specific pricing and rate details. "
+                    "Please log in to your ShipCube account to see full pricing."
+                )
+
             items.append({
-                "question": q.get("question", ""),
-                "answer": q.get("answer", ""),
+                "question": question,
+                "answer": ans,
             })
     except Exception as e:
         print("faq_by_tag error:", e)
@@ -434,7 +468,7 @@ def faq_by_tag(tag):
 
 @app.route('/ask', methods=['POST'])
 def ask():
-    ASK_REQUESTS.inc()   # count each /ask call
+    ASK_REQUESTS.inc()
     data = request.get_json(silent=True) or {}
     query = (data.get('query') or '').strip()
     icon = data.get('icon')
@@ -443,11 +477,33 @@ def ask():
     if not query and not icon:
         return jsonify({'ok': False, 'response': 'Please send a question.'}), 400
 
-    # Build the effective question text (for history only)
+    # ---------- 1) EARLY PRICING GUARD ----------
+    price_keywords = [
+        "charge", "charges", "price", "pricing",
+        "cost", "fee", "rate", "$", "container",
+        "pallet", "handling"
+    ]
+    if any(k in query.lower() for k in price_keywords):
+        if not user_session:
+            msg = (
+                "This information includes detailed pricing. "
+                "Please log in to view exact charges and financial details."
+            )
+            append_chat_to_history('assistant', msg, user_session)
+            return jsonify({
+                "ok": True,
+                "response": {
+                    "question": None,
+                    "answer": msg,
+                    "source": "auth_required_pricing"
+                }
+            })
+
+    # ---------- 2) SAVE USER MESSAGE ----------
     effective_query = (f"[{icon}] " if icon else "") + query if query else ''
     append_chat_to_history('user', effective_query, user_session)
 
-    # ---------- ORDER / TRACKING HANDLING (early exit) ----------
+    # ---------- 3) ORDER / TRACKING HANDLING ----------
     candidate = None
     m = ORDER_RE.search(query)
     if m:
@@ -458,7 +514,7 @@ def ask():
         candidate = explicit.group(1)
 
     if candidate:
-        # Not logged in → ask to login, do NOT hit PDFs / RAG
+        # Not logged in → ask to login
         if not user_session:
             msg = (
                 "I detect an order or tracking number. "
@@ -507,35 +563,66 @@ def ask():
                     'source': 'order_not_found'
                 }
             })
-    # ---------- END ORDER HANDLING ----------
 
-    # ---------- GLOBAL RAG + LLM ----------
-    retrieval_hits = []
+    # ---------- 4) SMALL-TALK / GREETING HANDLER ----------
+    smalltalk_patterns = [
+        r'^(hi|hello|hey)\b',
+        r'^(hi|hello shipcube)\b',
+        r'^(how are you)\b',
+        r'^good (morning|afternoon|evening)\b',
+    ]
+    norm_q = query.lower().strip()
+    if any(re.match(p, norm_q) for p in smalltalk_patterns):
+        prompt = (
+            "You are ShipCube AI, a friendly logistics assistant.\n"
+            f"User said: '{query}'.\n"
+            "Respond with a short, warm greeting (1–2 sentences), mention ShipCube, "
+            "and invite them to ask a question about warehouses, logistics or orders."
+        )
+        ai_resp = get_ai_response(prompt)
+        append_chat_to_history('assistant', ai_resp, user_session)
+        return jsonify({
+            'ok': True,
+            'response': {
+                'question': None,
+                'answer': ai_resp,
+                'source': 'smalltalk'
+            }
+        })
+
+    # ---------- 5) RAG + GEMINI SUMMARISATION ----------
+    rag_res = None
     try:
-        retrieval_hits = get_retrieval_answer(
+        rag_res = generate_answer_from_retrieval(
             query,
             top_k=3,
             score_threshold=0.25,
-            tag=(icon or None)
         )
     except Exception as e:
-        print("Retrieval error:", e)
+        print("RAG / Gemini error:", e)
+        rag_res = None
 
-    if retrieval_hits:
-        top = retrieval_hits[0]
-        answer_text = top.get('answer') or top.get('content') or "No exact answer found."
-        src = top.get('source') or top.get('metadata', {}).get('source', 'global_kb')
+    if rag_res and rag_res.get("answer"):
+        answer_text = rag_res["answer"]
+
+        # Build a compact source string for display
+        src_list = [
+            f"{s['source']} (id={s['id']}, score={s['score']:.3f})"
+            for s in rag_res.get("sources", [])
+        ]
+        src_str = ", ".join(src_list) if src_list else "global_kb"
+
         append_chat_to_history('assistant', answer_text, user_session)
         return jsonify({
             'ok': True,
             'response': {
-                'question': top.get('question') or query,
-                'answer': answer_text,
-                'source': src
+                'question': query,       # user’s question
+                'answer': answer_text,   # Gemini summary based on context
+                'source': src_str,
             }
         })
 
-    # Fallback to LLM
+    # ---------- 5) FALLBACK TO LLM ----------
     ai_resp = get_ai_response(query)
     append_chat_to_history('assistant', ai_resp, user_session)
     return jsonify({
@@ -546,6 +633,7 @@ def ask():
             'source': 'generated'
         }
     })
+
 
 @app.route("/metrics")
 def metrics():
