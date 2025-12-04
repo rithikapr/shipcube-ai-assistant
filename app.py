@@ -10,8 +10,14 @@ from flask import (
 )
 from typing import List, Dict, Optional
 from werkzeug.security import generate_password_hash, check_password_hash
-from utils.ai_model import (get_ai_response,get_retrieval_answer,get_top_faq,
-get_items_for_tag, generate_answer_from_retrieval)
+from utils.ai_model import (
+    get_ai_response,
+    get_retrieval_answer,
+    get_top_faq,
+    get_items_for_tag,
+    generate_answer_from_retrieval,
+    summarise_context,          # <-- NEW: import summariser
+)
 from langchain_community.vectorstores import FAISS as LCFAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -42,6 +48,9 @@ ASK_REQUESTS = Counter(
     "Total /ask endpoint calls"
 )
 
+# 🔹 Global summarised chat context used for RAG (replaces broken `history` from teammate file)
+conversation_summary = ""
+
 app = Flask(__name__, static_folder='static', template_folder='templates')
 app.secret_key = os.environ.get('FLASK_SECRET', 'shipcube_dev_secret')
 
@@ -54,6 +63,7 @@ def get_db():
         db = g._database = sqlite3.connect(DB_PATH, check_same_thread=False)
         db.row_factory = sqlite3.Row
     return db
+
 
 def init_db():
     db = get_db()
@@ -465,9 +475,9 @@ def faq_by_tag(tag):
         print("faq_by_tag error:", e)
     return jsonify({"ok": True, "items": items})
 
-
 @app.route('/ask', methods=['POST'])
 def ask():
+    global conversation_summary          # 🔹 we mutate this global summary
     ASK_REQUESTS.inc()
     data = request.get_json(silent=True) or {}
     query = (data.get('query') or '').strip()
@@ -581,6 +591,10 @@ def ask():
         )
         ai_resp = get_ai_response(prompt)
         append_chat_to_history('assistant', ai_resp, user_session)
+
+        # update conversation summary with smalltalk reply as well
+        conversation_summary = (conversation_summary + " \n " + ai_resp).strip()
+
         return jsonify({
             'ok': True,
             'response': {
@@ -590,11 +604,19 @@ def ask():
             }
         })
 
-    # ---------- 5) RAG + GEMINI SUMMARISATION ----------
+    # ---------- 5) RAG + GEMINI SUMMARISATION WITH CONTEXT SUMMARY ----------
     rag_res = None
     try:
+        # compress previous conversation summary
+        conversation_summary = summarise_context(conversation_summary) or ""
+
+        # include summarised history as context in the query 
+        query_for_rag = query
+        if conversation_summary:
+            query_for_rag = query + " \n Context: " + conversation_summary
+
         rag_res = generate_answer_from_retrieval(
-            query,
+            query_for_rag,
             top_k=3,
             score_threshold=0.25,
         )
@@ -613,18 +635,26 @@ def ask():
         src_str = ", ".join(src_list) if src_list else "global_kb"
 
         append_chat_to_history('assistant', answer_text, user_session)
+
+        # extend conversation summary with latest answer
+        conversation_summary = (conversation_summary + " \n " + answer_text).strip()
+
         return jsonify({
             'ok': True,
             'response': {
-                'question': query,       # user’s question
+                'question': query,       # show the user's actual question, not the augmented one
                 'answer': answer_text,   # Gemini summary based on context
                 'source': src_str,
             }
         })
 
-    # ---------- 5) FALLBACK TO LLM ----------
+    # ---------- 6) FALLBACK TO LLM ----------
     ai_resp = get_ai_response(query)
     append_chat_to_history('assistant', ai_resp, user_session)
+
+    # update conversation summary with fallback answer
+    conversation_summary = (conversation_summary + " \n " + ai_resp).strip()
+
     return jsonify({
         'ok': True,
         'response': {
@@ -634,10 +664,20 @@ def ask():
         }
     })
 
-
 @app.route("/metrics")
 def metrics():
     return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
+
+# Invoice route  with login check
+@app.route('/invoice')
+def invoice():
+    user = session.get('user')
+    if not user:
+        flash("Please log in to access invoices.", "warning")
+        return redirect(url_for('login'))
+
+    # TODO: placeholder – Priyanka will implement logic here later to download page
+    return render_template('invoice.html', user=user)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

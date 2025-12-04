@@ -15,3 +15,4 @@ langchain-core==0.2.38
 langchain-community==0.2.16
 langchain-google-genai==1.0.10
 google-generativeai
+werkzeug

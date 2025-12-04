@@ -47,7 +47,19 @@
       <button class="category" data-cat="warehouse">🏬 Warehouse</button>
       <button class="category" data-cat="logistics">🚚 Logistics</button>
       <button class="category" data-cat="finance">💰 Finance</button>
+      
+      <!-- {% if user %}
+      <div class="divider" style="margin-top:8px;"></div>
+      <button class="category" onclick="location.href='{{ url_for('invoice') }}'">
+        🧾 Get Invoice
+      </button>
+      {% endif %} -->
 
+      {% if user %} 
+      <button class="category" onclick="location.href=`{{ url_for('invoice') }}`">
+      🧾 Get Invoice </button>
+      {% endif %}
+      
       <div class="note">
         Click a category to browse curated Q&amp;A, or type a question below.
       </div>

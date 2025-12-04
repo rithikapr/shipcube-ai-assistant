@@ -4,6 +4,7 @@ import os
 import re
 from pathlib import Path
 from typing import List, Dict, Optional
+
 from sentence_transformers import SentenceTransformer
 from langchain_community.vectorstores import FAISS as LCFAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -16,6 +17,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash-lite")
 BASE_DIR = Path(__file__).resolve().parent.parent  # project root
 DATA_DIR = BASE_DIR / "data"
+
 QNA_JSON_PATH = DATA_DIR / "qna.json"
 GLOBAL_KB_DIR = DATA_DIR / "global_kb"    # unified KB from build_global_kb.py
 
@@ -41,6 +43,7 @@ def _ensure_model() -> SentenceTransformer:
         _model = SentenceTransformer(MODEL_NAME)
     return _model
 
+
 def _ensure_llm() -> ChatGoogleGenerativeAI:
     global _llm
     if _llm is None:
@@ -50,6 +53,7 @@ def _ensure_llm() -> ChatGoogleGenerativeAI:
             max_output_tokens=512,
         )
     return _llm
+
 
 def _ensure_qna_loaded():
     """Load QNA JSON once into QNA list."""
@@ -64,6 +68,7 @@ def _ensure_qna_loaded():
 
     with QNA_JSON_PATH.open("r", encoding="utf-8") as f:
         QNA = json.load(f)
+
 
 def _ensure_global_kb_loaded():
     """
@@ -213,9 +218,11 @@ def get_retrieval_answer(
     # 4) Sort by score descending and cut to top_k
     filtered.sort(key=lambda r: r.get("score", 0.0), reverse=True)
     return filtered[:top_k]
+
 # ---------------------------------------------------------------------
 # LLM wrapper (Gemini)
 # ---------------------------------------------------------------------
+
 def get_ai_response(prompt: str) -> str:
     """
     Generate a reply using Gemini.
@@ -248,6 +255,37 @@ def get_ai_response(prompt: str) -> str:
     except Exception as e:
         print("[genai] generation error:", e)
         return "Sorry, the model couldn't produce a useful answer right now."
+
+# ---------------------------------------------------------------------
+# Summariser used for chat history / context compression
+# ---------------------------------------------------------------------
+
+def summarise_context(context: str) -> str:
+    """
+    Summarise a long context string into < 100 words
+    for storing / passing into RAG as chat history.
+    """
+    llm = _ensure_llm()
+
+    system_msg = (
+        "You are an expert summarizer. I need to pass this to a RAG model, so context is required. "
+        "Summarize the given context in less than 100 words. If context is too large, trim from the earlier "
+        "context, that is, the lines from the start. "
+        "Summarize as you store context information for your user for a chat. "
+        "Don't add anything extra than the context like I can do this or that. If no context, leave blank response."
+    )
+
+    full_prompt = system_msg + "\n\n" + (context or "")
+
+    try:
+        res = llm.invoke(full_prompt)
+        content = (getattr(res, "content", "") or "").strip()
+        # If strictly no content, return empty (as per instructions)
+        return content
+    except Exception as e:
+        print("[genai] summarization error:", e)
+        # For summariser, an empty string is safer than an error message
+        return ""
 
 # ---------------------------------------------------------------------
 # Higher-level: retrieval + Gemini summarisation
