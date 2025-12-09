@@ -4,6 +4,7 @@ const sendBtn = document.getElementById("sendBtn");
 const faqList = document.getElementById("faqList");
 const topSearch = document.getElementById("topSearch");
 const topAsk = document.getElementById("topAsk");
+const feedbackState = {}; // { [messageId]: 1 or -1 }
 
 function el(tag, cls, text) {
   const d = document.createElement(tag);
@@ -11,7 +12,13 @@ function el(tag, cls, text) {
   if (text !== undefined) d.textContent = text;
   return d;
 }
-
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 function scrollChat() {
   if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
 }
@@ -34,13 +41,38 @@ function addBubble(text, role = "ai", meta) {
     avatar.textContent = "U";
   } else {
     avatar.style.backgroundImage = "url('/static/images/shipcube_logo.png')";
+    avatar.style.backgroundSize = "cover";
   }
 
-  bubble.textContent = text || "";
+  const textDiv = el("div", "bubble-text");
+  textDiv.innerHTML = escapeHtml(text || "");
+  bubble.appendChild(textDiv);
 
   if (meta && meta.source) {
     const metaLine = el("div", "bubble-meta", "Source: " + meta.source);
     bubble.appendChild(metaLine);
+  }
+  if (role === "ai") {
+    const msgId =
+      "msg-" + Date.now() + "-" + Math.floor(Math.random() * 100000);
+    row.dataset.msgId = msgId;
+
+    // store question/answer later via dataset if you want; for now only answer.
+    row.dataset.answer = text || "";
+
+    const feedbackDiv = el("div", "feedback");
+    const label = el("span", "feedback-label", "Was this helpful?");
+    const upBtn = el("button", "thumb thumb-up", "👍");
+    const downBtn = el("button", "thumb thumb-down", "👎");
+
+    upBtn.setAttribute("data-value", "1");
+    downBtn.setAttribute("data-value", "-1");
+
+    feedbackDiv.appendChild(label);
+    feedbackDiv.appendChild(upBtn);
+    feedbackDiv.appendChild(downBtn);
+
+    bubble.appendChild(feedbackDiv);
   }
 
   if (role === "user") {
@@ -99,6 +131,7 @@ async function askServer(payload) {
 async function sendMessage() {
   const text = (chatInput.value || "").trim();
   if (!text) return;
+
   addBubble(text, "user");
   chatInput.value = "";
   showTyping(true);
@@ -144,16 +177,19 @@ async function sendMessage() {
 }
 
 // wire send
-sendBtn.addEventListener("click", sendMessage);
-chatInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
-  }
-});
-
-// optional top-search (currently you don't have these in HTML, so this is no-op)
-if (topAsk) {
+if (sendBtn) {
+  sendBtn.addEventListener("click", sendMessage);
+}
+if (chatInput) {
+  chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+}
+// optional top-search
+if (topAsk && topSearch) {
   topAsk.addEventListener("click", () => {
     chatInput.value = topSearch.value;
     sendMessage();
@@ -167,16 +203,6 @@ if (topAsk) {
 }
 
 // --------- FAQ helpers (right-hand pane) ---------
-
-function escapeHtml(s) {
-  return (s || "").replace(/[&<>"']/g, (c) => {
-    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[
-      c
-    ];
-  });
-}
-
-// Render FAQ cards
 function renderFAQ(items) {
   if (!faqList) return;
   faqList.innerHTML = "";
@@ -246,3 +272,53 @@ window.addEventListener("load", () => {
     loadCategoryFAQ("about");
   }
 });
+
+  // Global click handler for thumbs (event delegation)
+  document.addEventListener('click', function (e) {
+    const btn = e.target.closest('.thumb');
+    if (!btn) return;
+
+    const msgRow = btn.closest('.msg-row');
+    if (!msgRow) return;
+
+    const msgId = msgRow.dataset.msgId;
+    const value = parseInt(btn.getAttribute("data-value"), 10); // 1 or -1
+    if (!msgId || (value !== 1 && value !== -1)) return;
+
+    const upBtn = msgRow.querySelector('.thumb-up');
+    const downBtn = msgRow.querySelector('.thumb-down');
+
+    if (!upBtn || !downBtn) return;
+
+    // Radio-button style toggle
+    if (value === 1) {
+      upBtn.classList.add('active');
+      downBtn.classList.remove('active');
+    } else {
+      downBtn.classList.add('active');
+      upBtn.classList.remove('active');
+    }
+
+    feedbackState[msgId] = value;
+
+    // Send to backend
+    const payload = {
+      message_id: msgId,
+      rating: value,
+      question: msgRow.dataset.question || null,
+      answer: msgRow.dataset.answer || null,
+      model: "gemini-2.5-flash-lite" // or read from a global var if you like
+    };
+
+    sendFeedback(payload);
+  });
+
+  function sendFeedback(payload) {
+    fetch('/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch(err => {
+      console.error('Feedback send error:', err);
+    });
+  }

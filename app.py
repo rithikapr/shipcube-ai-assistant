@@ -16,11 +16,12 @@ from utils.ai_model import (
     get_top_faq,
     get_items_for_tag,
     generate_answer_from_retrieval,
-    summarise_context,          # <-- NEW: import summariser
+    summarise_context,         
 )
 from langchain_community.vectorstores import FAISS as LCFAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from flask import request, jsonify, session  
 
 DB_PATH = os.environ.get('DB_PATH', 'data/shipcube.db')
 ANON_HISTORY_LIMIT = 100
@@ -108,6 +109,66 @@ def init_db():
     """)
     db.commit()
 
+def init_db():
+    db = get_db()
+    cur = db.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at REAL DEFAULT (strftime('%s','now'))
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS chats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NULL,
+        is_anonymous INTEGER DEFAULT 0,
+        role TEXT NOT NULL,   -- 'user' or 'assistant'
+        message TEXT NOT NULL,
+        ts REAL DEFAULT (strftime('%s','now')),
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS client_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        UserID TEXT,
+        MerchantName TEXT,
+        CustomerName TEXT,
+        OrderID TEXT,
+        TransactionStatus TEXT,
+        TrackingID TEXT,
+        Carrier TEXT,
+        CarrierService TEXT,
+        FinalInvoiceAmt REAL,
+        City TEXT,
+        ZipCode TEXT,
+        DestinationCountry TEXT,
+        OrderInsertTimestamp TEXT
+    )
+    """)
+
+    # store like / dislike feedback per answer
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NULL,
+        message_id TEXT,
+        rating INTEGER,          -- 1 for like, -1 for dislike
+        question TEXT,
+        answer TEXT,
+        model_name TEXT,
+        ts REAL DEFAULT (strftime('%s','now')),
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """)
+
+    db.commit()
 
 @app.teardown_appcontext
 def close_connection(exception):
@@ -292,6 +353,41 @@ def logout():
     session.clear()
     return redirect(url_for('index'))
 
+@app.route('/feedback', methods=['POST'])
+def feedback():
+    """
+    Receive thumbs up/down for a specific assistant response.
+    Payload expected (JSON):
+      {
+        "message_id": "msg-173314234",
+        "rating": 1 or -1,
+        "question": "...",
+        "answer": "...",
+        "model": "gemini-2.5-flash-lite"
+      }
+    """
+    data = request.get_json(silent=True) or {}
+    msg_id = data.get('message_id')
+    rating = data.get('rating')
+
+    if msg_id is None or rating not in [1, -1]:
+        return jsonify({'ok': False, 'error': 'Invalid payload'}), 400
+
+    user = session.get('user')
+    user_id = user['id'] if user else None
+
+    question = data.get('question')
+    answer = data.get('answer')
+    model_name = data.get('model')
+
+    db = get_db()
+    db.execute("""
+        INSERT INTO feedback (user_id, message_id, rating, question, answer, model_name)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (user_id, msg_id, rating, question, answer, model_name))
+    db.commit()
+
+    return jsonify({'ok': True})
 
 # --- history helpers --------------------------------------------------------
 def append_chat_to_history(role, message, user_session):
@@ -607,19 +703,16 @@ def ask():
     # ---------- 5) RAG + GEMINI SUMMARISATION WITH CONTEXT SUMMARY ----------
     rag_res = None
     try:
-        # compress previous conversation summary
+        # still keep / update the summary (for future use if you want)
         conversation_summary = summarise_context(conversation_summary) or ""
 
-        # include summarised history as context in the query 
-        query_for_rag = query
-        if conversation_summary:
-            query_for_rag = query + " \n Context: " + conversation_summary
-
+        # IMPORTANT: pass ONLY the raw user question into retrieval
         rag_res = generate_answer_from_retrieval(
-            query_for_rag,
+            query,          # not query_for_rag
             top_k=3,
             score_threshold=0.25,
         )
+
     except Exception as e:
         print("RAG / Gemini error:", e)
         rag_res = None

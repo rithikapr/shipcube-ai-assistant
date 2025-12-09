@@ -137,3 +137,30 @@ body,html{height:100%;margin:0;font-family:Inter, Arial, sans-serif;color:var(--
   border: 1px solid #e74c3c;
   color: #b71c1c;
 }
+.feedback {
+  margin-top: 6px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #6b7280;
+}
+
+.feedback-label {
+  margin-right: 4px;
+}
+
+.thumb {
+  border: none;
+  background: #f3f4f6;
+  border-radius: 999px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.thumb.active {
+  background: #e0edff;
+  color: #1d4ed8;
+  font-weight: 600;
+}

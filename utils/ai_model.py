@@ -32,10 +32,39 @@ _global_vectordb: Optional[LCFAISS] = None
 _model: Optional[SentenceTransformer] = None
 _llm: Optional[ChatGoogleGenerativeAI] = None
 QNA: List[Dict] = []  # exported for other modules
+QNA: List[Dict] = []  # exported for other modules
+
+# cached semantic embeddings for FAQ questions
+_QNA_EMBEDDINGS = None   # type: ignore
+_QNA_QUESTIONS: List[str] = []
 
 # ---------------------------------------------------------------------
 # Lazy loaders
 # ---------------------------------------------------------------------
+def _ensure_qna_embeddings():
+    """
+    Encode all FAQ questions once into embeddings, cached globally.
+    """
+    global _QNA_EMBEDDINGS, _QNA_QUESTIONS
+
+    _ensure_qna_loaded()
+    if _QNA_EMBEDDINGS is not None:
+        return
+
+    if not QNA:
+        _QNA_EMBEDDINGS = None
+        _QNA_QUESTIONS = []
+        return
+
+    questions: List[str] = []
+    for item in QNA:
+        q_text = (item.get("question") or item.get("Question") or "").strip()
+        questions.append(q_text)
+
+    model = _ensure_model()
+    # normalised embeddings → cosine similarity is just dot product
+    _QNA_EMBEDDINGS = model.encode(questions, normalize_embeddings=True)
+    _QNA_QUESTIONS = questions
 
 def _ensure_model() -> SentenceTransformer:
     global _model
@@ -107,6 +136,71 @@ def get_top_faq(limit: int = 6) -> List[Dict]:
         return []
     return QNA[:limit]
 
+def direct_faq_match(query: str) -> Optional[Dict]:
+    """
+    Generic lexical matcher over FAQ questions.
+
+    Idea: if most of the *user's* words appear in a FAQ question,
+    we treat it as a direct FAQ-style query and answer from qna.json.
+    No domain-specific hardcoding.
+    """
+    _ensure_qna_loaded()
+    q_raw = (query or "").strip()
+    if not q_raw or not QNA:
+        return None
+
+    # 🔹 If query has "Context: ..." appended, strip it off.
+    lower_all = q_raw.lower()
+    idx = lower_all.find("context:")
+    if idx != -1:
+        q_raw = q_raw[:idx].strip()
+
+    def norm_tokens(text: str) -> List[str]:
+        text = text.lower()
+        text = re.sub(r"[^a-z0-9\s]", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return []
+        return text.split()
+
+    q_tokens = norm_tokens(q_raw)
+    if len(q_tokens) == 0:
+        return None
+
+    q_set = set(q_tokens)
+
+    best_item: Optional[Dict] = None
+    best_score: float = 0.0
+
+    for item in QNA:
+        faq_q_raw = (item.get("question") or item.get("Question") or "").strip()
+        if not faq_q_raw:
+            continue
+
+        faq_tokens = norm_tokens(faq_q_raw)
+        if not faq_tokens:
+            continue
+
+        faq_set = set(faq_tokens)
+        inter = q_set & faq_set
+        if not inter:
+            continue
+
+        coverage_query = len(inter) / len(q_set)
+        coverage_faq = len(inter) / len(faq_set)
+
+        score = 0.7 * coverage_query + 0.3 * coverage_faq
+        score -= 0.01 * len(faq_set)
+
+        if score > best_score:
+            best_score = score
+            best_item = item
+
+    # loosen threshold a bit to be safe
+    if best_item is not None and best_score >= 0.55:
+        return best_item
+
+    return None
 
 def get_items_for_tag(tag: str, limit: int = 10) -> List[Dict]:
     """
@@ -299,36 +393,48 @@ def generate_answer_from_retrieval(
     concise_word_limit: int = 70,
 ) -> Dict:
     """
-    High-level wrapper: run retrieval -> build concise context -> call LLM -> return structured response.
-
-    Returns:
-      {
-        "query": str,
-        "answer": str,
-        "sources": [ {"id": int, "source": str, "score": float, "snippet": str}, ... ],
-        "used_context": str
-      }
+    0) Try direct FAQ match on qna.json.
+    1) Otherwise run retrieval (PDF + FAQ) and build a concise context.
+    2) Call Gemini to summarise that context.
     """
-    # 1) Retrieval
+
+    # ---------- 0) DIRECT FAQ MATCH ----------
+    direct = direct_faq_match(query)
+    if direct:
+        q_text = direct.get("Question") or direct.get("question") or ""
+        a_text = direct.get("Answer") or direct.get("answer") or ""
+        raw = f"Q: {q_text}\nA: {a_text}"
+
+        return {
+            "query": query,
+            "answer": a_text,
+            "sources": [{
+                "id": 1,
+                "source": "faq_direct",
+                "score": 1.0,
+                "snippet": raw[:300] + ("..." if len(raw) > 300 else ""),
+            }],
+            "used_context": raw,
+        }
+
+    # ---------- 1) VECTOR RETRIEVAL (RAG) ----------
     hits = get_retrieval_answer(query, top_k=top_k, score_threshold=score_threshold)
     if not hits:
-        # fallback behaviour if nothing is retrieved
         prompt_noctx = (
             "Context:\n\n"
             "User question: {}\n\n"
             "Instructions: You do NOT have context. Answer concisely and clearly. "
-            "If you don't know, say 'I don't know' or ask for clarification.".format(query)
-        )
+            "If you don't know, say 'I don't know' or ask for clarification."
+        ).format(query)
         ans = get_ai_response(prompt_noctx)
         return {"query": query, "answer": ans, "sources": [], "used_context": ""}
 
-    # 2) Prepare sources list
+    # ---------- 2) BUILD CONTEXT & CALL GEMINI ----------
     sources = []
     for i, h in enumerate(hits, start=1):
         snippet = (h.get("answer") or "").strip()
         snippet_short = (
-            snippet
-            if len(snippet) <= 300
+            snippet if len(snippet) <= 300
             else snippet[:300].rsplit(" ", 1)[0] + "..."
         )
         sources.append(
@@ -340,8 +446,7 @@ def generate_answer_from_retrieval(
             }
         )
 
-    # 3) Build context text (numbered blocks [1], [2], ...)
-    max_chars = max_context_tokens * 4  # rough token->char heuristic
+    max_chars = max_context_tokens * 4
     context_parts = []
     chars_used = 0
 
@@ -366,7 +471,6 @@ def generate_answer_from_retrieval(
 
     context_text = "".join(context_parts).strip()
 
-    # 4) Prompt for Gemini
     prompt = (
         "Context:\n\n"
         f"{context_text}\n\n"
@@ -375,21 +479,17 @@ def generate_answer_from_retrieval(
         "Instructions:\n"
         "- Base your answer ONLY on the Context above.\n"
         f"- Keep the answer concise and clear (around {concise_word_limit} words or less).\n"
-        "- If the user query is very general, like a friendly talk, reply as you are an assistant working in ShipCube.\n"
-        "- If the context doesn't contain enough info to answer, say \"I don't know\" and list the most relevant sources.\n"
+        "- If the context doesn't contain enough info to answer, say \"I don't know\" "
+        "and list the most relevant sources.\n"
         "- Provide a 1–2 sentence actionable answer.\n"
     )
 
-    # 5) Call LLM
     answer = get_ai_response(prompt)
 
-    # Try to detect explicit [1], [2] citations from the answer (optional)
     cited_ids = re.findall(r"\[(\d+)\]", answer)
     cited_ids = sorted({int(x) for x in cited_ids if x.isdigit()})
-
     cited_sources = [s for s in sources if s["id"] in cited_ids]
     if not cited_sources:
-        # If LLM didn't cite, include top 1–2 sources by default
         cited_sources = sources[: min(2, len(sources))]
 
     return {
