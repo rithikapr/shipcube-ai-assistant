@@ -65,69 +65,24 @@ Project Structure (key files)
 project_root/
 ├─ app.py                   # Flask app, routes, DB init, /ask logic
 ├─ utils/
-│  └─ ai_model.py           # LLM wrapper, FAQ helpers, RAG pipeline
+  └─ ai_model.py           # LLM wrapper, FAQ helpers, RAG pipeline
 ├─ build_global_kb.py       # Builds unified FAISS index from PDFs + FAQ
 ├─ data/
-│  ├─ shipcube.db           # SQLite DB (created at runtime)
-│  ├─ qna.json              # FAQ knowledge base
-│  ├─ pdfs/                 # Source PDFs
-│  └─ global_kb/            # FAISS vector store (PDF + FAQ)
+  ├─ shipcube.db           # SQLite DB (created at runtime)
+  ├─ qna.json              # FAQ knowledge base
+  ├─ pdfs/                 # Source PDFs
+  └─ global_kb/            # FAISS vector store (PDF + FAQ)
 ├─ templates/
-│  ├─ index.html            # Main chat UI
-│  ├─ invoice.html          # Invoice page (extends layout)
-│  ├─ login.html            # Login / register page (not shown above)
-│  └─ dashboard.html        # Simple dashboard placeholder
+  ├─ index.html            # Main chat UI
+  ├─ invoice.html          # Invoice page (extends layout)
+  ├─ login.html            # Login / register page (not shown above)
+  └─ dashboard.html        # Simple dashboard placeholder
 └─ static/
    ├─ css/style.css         # Styles
    ├─ js/chat.js            # Chat + FAQ + feedback logic
    └─ images/shipcube_logo.png
 
-Flowchart
-                           ┌────────────────────── ───┐
-                           │   User (Web Browser)     │
-                           │ Chat UI + FAQ Sidebar    │
-                           └───────────────┬──────────┘
-                                           │
-                                           ▼
-                                 Front-End Logic (chat.js)
-                                 - Captures query
-                                 - Shows typing indicator
-                                 - Sends /ask & renders reply
-                                           │
-                                           ▼
-                               ┌───────────────────────┐
-                               │ Flask Backend (app.py)│
-                               └───────────┬───────────┘
-                                           │
-                     ┌──────────────────────────────────────────────────┐
-                     │  Intelligent Routing in `/ask`                   │
-                     │  • Pricing Guard (login required)                │
-                     │  • Order Detection → DB lookup (`client_orders`) │
-                     │  • Small-talk → Friendly Gemini reply            │
-                     │  • Otherwise go to RAG pipeline                  │
-                     └──────────────────────────────────────────────────┘
-                                           │
-                                           ▼
-                          RAG Pipeline (utils/ai_model.py)
-     ┌────────────────────────────────────────────────────────────────────────┐
-     │ 1️⃣ Direct FAQ match? → Gemini summarised FAQ answer                    │
-     │ 2️⃣ If not: Vector search in FAISS (PDF + FAQ global_kb)                │
-     │ 3️⃣ Build short context from best matches                               │
-     │ 4️⃣ Pass “Context + Question” → Gemini (Google GenAI API)               │
-     │ 5️⃣ Return concise answer + top sources                                 │
-     └─────────────────────────────────────────────────────────────────────────┘
-                                           │
-                                           ▼
-                ┌────────────────────────────────────────────┐
-                │ Save chat + summary to SQLite (chats)      │
-                │ Return answer + source + message_id        │
-                └────────────────────────────────────────────┘
-                                           │
-                                           ▼
-            UI Appends Assistant Message + 👍/👎 Feedback Buttons
-                                           │
-                                           ▼
-                    Feedback → /feedback → Stored in SQLite
+<img width="449" height="436" alt="image" src="https://github.com/user-attachments/assets/2fef526f-ca9a-4139-8e49-bdb757893774" />
 
 
 ──────────────────────────────────────────────────────────────────────────────
