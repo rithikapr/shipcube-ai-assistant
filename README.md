@@ -60,34 +60,9 @@ Features
 
 ---
 
-Project Structure (key files)
-
-project_root/
-├─ app.py                   # Flask app, routes, DB init, /ask logic
-├─ utils/
-  └─ ai_model.py           # LLM wrapper, FAQ helpers, RAG pipeline
-├─ build_global_kb.py       # Builds unified FAISS index from PDFs + FAQ
-├─ data/
-  ├─ shipcube.db           # SQLite DB (created at runtime)
-  ├─ qna.json              # FAQ knowledge base
-  ├─ pdfs/                 # Source PDFs
-  └─ global_kb/            # FAISS vector store (PDF + FAQ)
-├─ templates/
-  ├─ index.html            # Main chat UI
-  ├─ invoice.html          # Invoice page (extends layout)
-  ├─ login.html            # Login / register page (not shown above)
-  └─ dashboard.html        # Simple dashboard placeholder
-└─ static/
-   ├─ css/style.css         # Styles
-   ├─ js/chat.js            # Chat + FAQ + feedback logic
-   └─ images/shipcube_logo.png
-
 <img width="449" height="436" alt="image" src="https://github.com/user-attachments/assets/2fef526f-ca9a-4139-8e49-bdb757893774" />
 
-
-──────────────────────────────────────────────────────────────────────────────
 Supporting Components
-──────────────────────────────────────────────────────────────────────────────
 • DB Initialization: users, client_orders, chats, feedback  
 • Authentication: login/register, access to invoices & pricing data  
 • build_global_kb.py: offline FAISS index creation (PDF + FAQ)  
