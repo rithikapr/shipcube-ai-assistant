@@ -12,16 +12,15 @@ from typing import List, Dict, Optional
 from werkzeug.security import generate_password_hash, check_password_hash
 from utils.ai_model import (
     get_ai_response,
-    get_retrieval_answer,
     get_top_faq,
-    get_items_for_tag,
-    generate_answer_from_retrieval,
-    summarise_context,         
+    get_items_for_tag    
 )
+from utils.rag_pipeline import shipcube_agent 
 from langchain_community.vectorstores import FAISS as LCFAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from flask import request, jsonify, session  
+
 
 DB_PATH = os.environ.get('DB_PATH', 'data/shipcube.db')
 ANON_HISTORY_LIMIT = 100
@@ -571,189 +570,42 @@ def faq_by_tag(tag):
         print("faq_by_tag error:", e)
     return jsonify({"ok": True, "items": items})
 
+
 @app.route('/ask', methods=['POST'])
 def ask():
-    global conversation_summary          # 🔹 we mutate this global summary
     ASK_REQUESTS.inc()
     data = request.get_json(silent=True) or {}
     query = (data.get('query') or '').strip()
     icon = data.get('icon')
-    user_session = session.get('user')
 
     if not query and not icon:
         return jsonify({'ok': False, 'response': 'Please send a question.'}), 400
 
-    # ---------- 1) EARLY PRICING GUARD ----------
-    price_keywords = [
-        "charge", "charges", "price", "pricing",
-        "cost", "fee", "rate", "$", "container",
-        "pallet", "handling"
-    ]
-    if any(k in query.lower() for k in price_keywords):
-        if not user_session:
-            msg = (
-                "This information includes detailed pricing. "
-                "Please log in to view exact charges and financial details."
-            )
-            append_chat_to_history('assistant', msg, user_session)
-            return jsonify({
-                "ok": True,
-                "response": {
-                    "question": None,
-                    "answer": msg,
-                    "source": "auth_required_pricing"
-                }
-            })
+    if 'user' in session:
+        user_obj = session['user']
+        user_id = user_obj['id']
+    else:
+        if '_id' not in session:
+            session['_id'] = os.urandom(4).hex()
+        user_id = session['_id']
+        user_obj = {'id': user_id, 'is_guest': True}
 
-    # ---------- 2) SAVE USER MESSAGE ----------
-    effective_query = (f"[{icon}] " if icon else "") + query if query else ''
-    append_chat_to_history('user', effective_query, user_session)
+    
+    effective_query = (f"[{icon}] " if icon else "") + query
+    append_chat_to_history('user', effective_query, user_obj)
 
-    # ---------- 3) ORDER / TRACKING HANDLING ----------
-    candidate = None
-    m = ORDER_RE.search(query)
-    if m:
-        candidate = m.group(1)
+    chat_history_str = get_session_history(user_id)
+    response_data = shipcube_agent.process_query(query, chat_history_str, user_obj)
 
-    explicit = re.search(r'order\s+(\d{5,12})', query, re.IGNORECASE)
-    if explicit:
-        candidate = explicit.group(1)
-
-    if candidate:
-        # Not logged in → ask to login
-        if not user_session:
-            msg = (
-                "I detect an order or tracking number. "
-                "Please log in to view order-specific details."
-            )
-            append_chat_to_history('assistant', msg, user_session)
-            return jsonify({
-                'ok': True,
-                'response': {
-                    'question': None,
-                    'answer': msg,
-                    'source': 'auth_required'
-                }
-            })
-
-        # Logged in → look up in client_orders
-        order = find_order_in_db(candidate)
-        if order:
-            text = (
-                f"Order {order.get('order_id') or order.get('store_orderid') or candidate}: "
-                f"status {order.get('transaction_status') or 'unknown'}. "
-                f"Customer: {order.get('customername') or 'N/A'}. "
-                f"Merchant: {order.get('merchant_name') or 'N/A'}. "
-                f"Carrier: {order.get('carrier') or order.get('carrier_service') or 'N/A'}. "
-                f"Amount: {order.get('final_invoice_amt') or 'N/A'}. "
-                f"Destination: {order.get('city') or 'N/A'}, "
-                f"Zip: {order.get('zip_code') or 'N/A'}."
-            )
-            append_chat_to_history('assistant', text, user_session)
-            return jsonify({
-                'ok': True,
-                'response': {
-                    'question': f"Order {candidate}",
-                    'answer': text,
-                    'source': 'order_db'
-                }
-            })
-        else:
-            msg = f"No order found for {candidate}."
-            append_chat_to_history('assistant', msg, user_session)
-            return jsonify({
-                'ok': True,
-                'response': {
-                    'question': None,
-                    'answer': msg,
-                    'source': 'order_not_found'
-                }
-            })
-
-    # ---------- 4) SMALL-TALK / GREETING HANDLER ----------
-    smalltalk_patterns = [
-        r'^(hi|hello|hey)\b',
-        r'^(hi|hello shipcube)\b',
-        r'^(how are you)\b',
-        r'^good (morning|afternoon|evening)\b',
-    ]
-    norm_q = query.lower().strip()
-    if any(re.match(p, norm_q) for p in smalltalk_patterns):
-        prompt = (
-            "You are ShipCube AI, a friendly logistics assistant.\n"
-            f"User said: '{query}'.\n"
-            "Respond with a short, warm greeting (1–2 sentences), mention ShipCube, "
-            "and invite them to ask a question about warehouses, logistics or orders."
-        )
-        ai_resp = get_ai_response(prompt)
-        append_chat_to_history('assistant', ai_resp, user_session)
-
-        # update conversation summary with smalltalk reply as well
-        conversation_summary = (conversation_summary + " \n " + ai_resp).strip()
-
-        return jsonify({
-            'ok': True,
-            'response': {
-                'question': None,
-                'answer': ai_resp,
-                'source': 'smalltalk'
-            }
-        })
-
-    # ---------- 5) RAG + GEMINI SUMMARISATION WITH CONTEXT SUMMARY ----------
-    rag_res = None
-    try:
-        # still keep / update the summary (for future use if you want)
-        conversation_summary = summarise_context(conversation_summary) or ""
-
-        # IMPORTANT: pass ONLY the raw user question into retrieval
-        rag_res = generate_answer_from_retrieval(
-            query,          # not query_for_rag
-            top_k=3,
-            score_threshold=0.25,
-        )
-
-    except Exception as e:
-        print("RAG / Gemini error:", e)
-        rag_res = None
-
-    if rag_res and rag_res.get("answer"):
-        answer_text = rag_res["answer"]
-
-        # Build a compact source string for display
-        src_list = [
-            f"{s['source']} (id={s['id']}, score={s['score']:.3f})"
-            for s in rag_res.get("sources", [])
-        ]
-        src_str = ", ".join(src_list) if src_list else "global_kb"
-
-        append_chat_to_history('assistant', answer_text, user_session)
-
-        # extend conversation summary with latest answer
-        conversation_summary = (conversation_summary + " \n " + answer_text).strip()
-
-        return jsonify({
-            'ok': True,
-            'response': {
-                'question': query,       # show the user's actual question, not the augmented one
-                'answer': answer_text,   # Gemini summary based on context
-                'source': src_str,
-            }
-        })
-
-    # ---------- 6) FALLBACK TO LLM ----------
-    ai_resp = get_ai_response(query)
-    append_chat_to_history('assistant', ai_resp, user_session)
-
-    # update conversation summary with fallback answer
-    conversation_summary = (conversation_summary + " \n " + ai_resp).strip()
+    answer_text = response_data['answer']
+    append_chat_to_history('assistant', answer_text, user_obj)
 
     return jsonify({
         'ok': True,
         'response': {
-            'question': None,
-            'answer': ai_resp,
-            'source': 'generated'
+            'question': query,
+            'answer': answer_text,
+            'source': response_data['source']
         }
     })
 
@@ -771,6 +623,38 @@ def invoice():
 
     # TODO: placeholder – Priyanka will implement logic here later to download page
     return render_template('invoice.html', user=user)
+
+
+def get_session_history(user_id, limit=10):
+    """
+        Fetches the last 'limit' messages for a specific user_id and formats them as a string for the AI model.
+
+    """
+
+    conn = sqlite3.connect('data/shipcube.db')
+    cursor = conn.cursor()
+    
+    query = """
+        SELECT role, message 
+        FROM chats 
+        WHERE user_id = ? 
+        ORDER BY ts DESC 
+        LIMIT ?
+    """
+    cursor.execute(query, (user_id, limit))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    rows = rows[::-1]
+    
+    formatted_history = []
+    for role, msg in rows:
+        display_role = "Human" if role == "user" else "AI"
+        formatted_history.append(f"{display_role}: {msg}")
+        
+    return "\n".join(formatted_history)
+
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

@@ -9,6 +9,8 @@ from sentence_transformers import SentenceTransformer
 from langchain_community.vectorstores import FAISS as LCFAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
 # ---------------------------------------------------------------------
 # Config
@@ -21,7 +23,7 @@ DATA_DIR = BASE_DIR / "data"
 QNA_JSON_PATH = DATA_DIR / "qna.json"
 GLOBAL_KB_DIR = DATA_DIR / "global_kb"    # unified KB from build_global_kb.py
 
-# 🔁 MUST match EMBED_MODEL_NAME in build_global_kb.py
+# MUST match EMBED_MODEL_NAME in build_global_kb.py
 MODEL_NAME = "sentence-transformers/all-mpnet-base-v2"
 
 # ---------------------------------------------------------------------
@@ -498,3 +500,34 @@ def generate_answer_from_retrieval(
         "sources": cited_sources,
         "used_context": context_text,
     }
+
+
+
+def contextualize_query(chat_history_str, latest_question):
+    """
+        Rewrites the latest question based on chat history to make it standalone.
+        #TODO: CAUTION: This can incur additional LLM costs and need to add a upper limit.
+    """
+    
+    if not chat_history_str:
+        return latest_question
+
+    contextualize_q_prompt = PromptTemplate.from_template(
+        """Given the following conversation and a follow-up question, rephrase the follow-up question to be a standalone question.
+        
+        Chat History:
+        {chat_history}
+        
+        Follow Up Input: {question}
+        
+        Standalone Question:"""
+    )
+    
+    chain = contextualize_q_prompt | llm | StrOutputParser()
+    
+    response = chain.invoke({
+        "chat_history": chat_history_str,
+        "question": latest_question
+    })
+    
+    return response
