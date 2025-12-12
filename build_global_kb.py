@@ -8,11 +8,12 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
+from utils.clean_pdf import clean_docs 
 
 PDF_DIR = Path("data/pdfs")
 KB_DIR = Path("data/global_kb")   # unified index (PDF + FAQ)
 QNA_JSON = Path("data/qna.json")
-EMBED_MODEL_NAME = "all-mpnet-base-v2"
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "sentence-transformers/all-mpnet-base-v2")
 
 # ------------------ FAQ loader (your improved version) ------------------ #
 def load_qna_docs_from_json():
@@ -53,43 +54,6 @@ def load_qna_docs_from_json():
     print(f"[faq] Loaded {len(docs)} FAQ docs from qna.json")
     return docs
 
-# ------------------ PDF cleaning  ------------------ #
-
-PAGE_FOOTER_RE = re.compile(
-    r"^\d+\s+\|\s+Warehouse Management: A Complete Guide for Retailers",
-    re.IGNORECASE,
-)
-SEE_ALSO_RE = re.compile(r"^SEE ALSO:", re.IGNORECASE)
-
-
-def clean_page_text(text: str) -> str:
-    """
-    Remove page footers, 'SEE ALSO' blocks etc. from a raw PDF page text.
-    """
-    lines = text.splitlines()
-    kept: list[str] = []
-
-    for line in lines:
-        s = line.strip()
-        if not s:
-            continue
-        # Skip known footer/header patterns
-        if PAGE_FOOTER_RE.match(s):
-            continue
-        if SEE_ALSO_RE.match(s):
-            continue
-
-        kept.append(s)
-
-    cleaned = " ".join(kept)
-    return cleaned.strip()
-
-def clean_docs(docs: list[Document]) -> list[Document]:
-    """Clean all PDF page documents in-place and return them."""
-    for page in docs:
-        page.page_content = clean_page_text(page.page_content)
-    return docs
-
 def load_all_pdfs(pdf_dir: Path):
     docs = []
     for pdf_path in pdf_dir.glob("*.pdf"):
@@ -101,9 +65,7 @@ def load_all_pdfs(pdf_dir: Path):
             d.metadata.setdefault("source_file", pdf_path.name)
         docs.extend(pdf_docs)
 
-    print(f"Total PDF pages loaded (before clean): {len(docs)}")
-    docs = clean_docs(docs)
-    print(f"Total PDF pages after cleaning: {len(docs)}")
+
     return docs
 
 # ------------------ Main KB build ------------------ #
@@ -113,6 +75,8 @@ def main():
 
     # 1. Load sources
     raw_pdf_docs = load_all_pdfs(PDF_DIR)          # pages from all PDFs
+    raw_pdf_docs = clean_docs(raw_pdf_docs)
+    print(raw_pdf_docs)
     faq_docs = load_qna_docs_from_json()           # curated FAQ from qna.json
 
     if not raw_pdf_docs and not faq_docs:

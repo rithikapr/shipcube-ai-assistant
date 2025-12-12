@@ -6,12 +6,14 @@ const topSearch = document.getElementById("topSearch");
 const topAsk = document.getElementById("topAsk");
 const feedbackState = {}; // { [messageId]: 1 or -1 }
 
+// ---------- small helpers ----------
 function el(tag, cls, text) {
   const d = document.createElement(tag);
   if (cls) d.className = cls;
   if (text !== undefined) d.textContent = text;
   return d;
 }
+
 function escapeHtml(str) {
   if (!str) return "";
   return String(str)
@@ -19,10 +21,12 @@ function escapeHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
+
 function scrollChat() {
   if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
 }
 
+// ---------- add bubbles ----------
 function addBubble(text, role = "ai", meta) {
   const row = el(
     "div",
@@ -52,13 +56,18 @@ function addBubble(text, role = "ai", meta) {
     const metaLine = el("div", "bubble-meta", "Source: " + meta.source);
     bubble.appendChild(metaLine);
   }
+
+  // Only AI messages get thumbs + message_id
   if (role === "ai") {
     const msgId =
       "msg-" + Date.now() + "-" + Math.floor(Math.random() * 100000);
     row.dataset.msgId = msgId;
 
-    // store question/answer later via dataset if you want; for now only answer.
+    // store answer + (optionally) question in DOM dataset
     row.dataset.answer = text || "";
+    if (meta && meta.question) {
+      row.dataset.question = meta.question;
+    }
 
     const feedbackDiv = el("div", "feedback");
     const label = el("span", "feedback-label", "Was this helpful?");
@@ -87,7 +96,7 @@ function addBubble(text, role = "ai", meta) {
   scrollChat();
 }
 
-// typing indicator
+// ---------- typing indicator ----------
 let typingEl = null;
 function showTyping(show = true) {
   if (show) {
@@ -95,6 +104,7 @@ function showTyping(show = true) {
     typingEl = el("div", "msg-row msg-ai typing-row");
     const avatar = el("div", "avatar avatar-ai");
     avatar.style.backgroundImage = "url('/static/images/shipcube_logo.png')";
+    avatar.style.backgroundSize = "cover";
     const bubble = el("div", "bubble bubble-ai");
     bubble.textContent = "Thinking...";
     typingEl.appendChild(avatar);
@@ -109,6 +119,7 @@ function showTyping(show = true) {
   }
 }
 
+// ---------- server calls ----------
 async function askServer(payload) {
   try {
     const res = await fetch("/ask", {
@@ -128,10 +139,12 @@ async function askServer(payload) {
   }
 }
 
+// ---------- main send ----------
 async function sendMessage() {
   const text = (chatInput.value || "").trim();
   if (!text) return;
 
+  const userQuestion = text; // keep the original question
   addBubble(text, "user");
   chatInput.value = "";
   showTyping(true);
@@ -160,6 +173,7 @@ async function sendMessage() {
     source = body.source || "retrieval_or_generated";
   }
 
+  // pricing / auth guard result
   if (
     source === "auth_required" ||
     (answerText &&
@@ -168,15 +182,20 @@ async function sendMessage() {
     addBubble(
       answerText || "Please log in to view this info.",
       "ai",
-      { source }
+      { source, question: userQuestion }
     );
     return;
   }
 
-  addBubble(answerText || "No answer found.", "ai", { source });
+  // normal AI answer
+  addBubble(
+    answerText || "No answer found.",
+    "ai",
+    { source, question: userQuestion }
+  );
 }
 
-// wire send
+// ---------- wire send ----------
 if (sendBtn) {
   sendBtn.addEventListener("click", sendMessage);
 }
@@ -188,7 +207,8 @@ if (chatInput) {
     }
   });
 }
-// optional top-search
+
+// optional top-search box
 if (topAsk && topSearch) {
   topAsk.addEventListener("click", () => {
     chatInput.value = topSearch.value;
@@ -202,7 +222,7 @@ if (topAsk && topSearch) {
   });
 }
 
-// --------- FAQ helpers (right-hand pane) ---------
+// ---------- FAQ helpers (right-hand pane) ----------
 function renderFAQ(items) {
   if (!faqList) return;
   faqList.innerHTML = "";
@@ -273,52 +293,52 @@ window.addEventListener("load", () => {
   }
 });
 
-  // Global click handler for thumbs (event delegation)
-  document.addEventListener('click', function (e) {
-    const btn = e.target.closest('.thumb');
-    if (!btn) return;
+// ---------- FEEDBACK (like / dislike) ----------
 
-    const msgRow = btn.closest('.msg-row');
-    if (!msgRow) return;
+// Global click handler for thumbs (event delegation)
+document.addEventListener("click", function (e) {
+  const btn = e.target.closest(".thumb");
+  if (!btn) return;
 
-    const msgId = msgRow.dataset.msgId;
-    const value = parseInt(btn.getAttribute("data-value"), 10); // 1 or -1
-    if (!msgId || (value !== 1 && value !== -1)) return;
+  const msgRow = btn.closest(".msg-row");
+  if (!msgRow) return;
 
-    const upBtn = msgRow.querySelector('.thumb-up');
-    const downBtn = msgRow.querySelector('.thumb-down');
+  const msgId = msgRow.dataset.msgId;
+  const value = parseInt(btn.getAttribute("data-value"), 10); // 1 or -1
+  if (!msgId || (value !== 1 && value !== -1)) return;
 
-    if (!upBtn || !downBtn) return;
+  const upBtn = msgRow.querySelector(".thumb-up");
+  const downBtn = msgRow.querySelector(".thumb-down");
+  if (!upBtn || !downBtn) return;
 
-    // Radio-button style toggle
-    if (value === 1) {
-      upBtn.classList.add('active');
-      downBtn.classList.remove('active');
-    } else {
-      downBtn.classList.add('active');
-      upBtn.classList.remove('active');
-    }
-
-    feedbackState[msgId] = value;
-
-    // Send to backend
-    const payload = {
-      message_id: msgId,
-      rating: value,
-      question: msgRow.dataset.question || null,
-      answer: msgRow.dataset.answer || null,
-      model: "gemini-2.5-flash-lite" // or read from a global var if you like
-    };
-
-    sendFeedback(payload);
-  });
-
-  function sendFeedback(payload) {
-    fetch('/feedback', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }).catch(err => {
-      console.error('Feedback send error:', err);
-    });
+  // Radio-button style toggle
+  if (value === 1) {
+    upBtn.classList.add("active");
+    downBtn.classList.remove("active");
+  } else {
+    downBtn.classList.add("active");
+    upBtn.classList.remove("active");
   }
+
+  feedbackState[msgId] = value;
+
+  const payload = {
+    message_id: msgId,
+    rating: value,
+    question: msgRow.dataset.question || null,
+    answer: msgRow.dataset.answer || null,
+    model: "gemini-2.5-flash-lite", // keep in sync with backend if needed
+  };
+
+  sendFeedback(payload);
+});
+
+function sendFeedback(payload) {
+  fetch("/feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch((err) => {
+    console.error("Feedback send error:", err);
+  });
+}

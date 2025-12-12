@@ -12,24 +12,16 @@ from typing import List, Dict, Optional
 from werkzeug.security import generate_password_hash, check_password_hash
 from utils.ai_model import (
     get_ai_response,
-    get_retrieval_answer,
     get_top_faq,
-    get_items_for_tag,
-    generate_answer_from_retrieval,
-    summarise_context,         
+    get_items_for_tag
 )
-from langchain_community.vectorstores import FAISS as LCFAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from utils.rag_pipeline import shipcube_agent
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from flask import request, jsonify, session  
 
 DB_PATH = os.environ.get('DB_PATH', 'data/shipcube.db')
 ANON_HISTORY_LIMIT = 100
 USER_HISTORY_LIMIT = 1000
-
-# Where your PDF-based KB is stored (created by build_doc_kb_langchain.py)
-DOC_KB_DIR = Path("data/doc_kb")
-EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+EMBED_MODEL_NAME = "sentence-transformers/all-mpnet-base-v2"
 
 # --- Prometheus metrics -------------------------------------------------------
 REQUEST_COUNT = Counter(
@@ -49,12 +41,20 @@ ASK_REQUESTS = Counter(
     "Total /ask endpoint calls"
 )
 
-# 🔹 Global summarised chat context used for RAG (replaces broken `history` from teammate file)
-conversation_summary = ""
-
 app = Flask(__name__, static_folder='static', template_folder='templates')
+# NOTE: replace with a real secret in production via env var FLASK_SECRET
 app.secret_key = os.environ.get('FLASK_SECRET', 'shipcube_dev_secret')
 
+# session-based conversation summary helpers (per-session, not global)
+def _summary_key():
+    user = session.get('user')
+    return f"summary_user_{user['id']}" if user else f"summary_anon_{session.get('_id', 'guest')}"
+
+def get_session_summary():
+    return session.get(_summary_key(), "")
+
+def set_session_summary(text: str):
+    session[_summary_key()] = text
 
 # --- DB helpers --------------------------------------------------------------
 def get_db():
@@ -65,53 +65,31 @@ def get_db():
         db.row_factory = sqlite3.Row
     return db
 
-
 def init_db():
     db = get_db()
     cur = db.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        created_at REAL DEFAULT (strftime('%s','now'))
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS chats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NULL,
-        is_anonymous INTEGER DEFAULT 0,
-        role TEXT NOT NULL,   -- 'user' or 'assistant'
-        message TEXT NOT NULL,
-        ts REAL DEFAULT (strftime('%s','now')),
-        FOREIGN KEY(user_id) REFERENCES users(id)
-    )
-    """)
-    # client_orders table: only a subset of columns (rest still exist if imported)
+
+    # client_orders table: snake_case column names to match normalized loader (user_id TEXT to allow anon token)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client_orders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        UserID TEXT,
-        MerchantName TEXT,
-        CustomerName TEXT,
-        OrderID TEXT,
-        TransactionStatus TEXT,
-        TrackingID TEXT,
-        Carrier TEXT,
-        CarrierService TEXT,
-        FinalInvoiceAmt REAL,
-        City TEXT,
-        ZipCode TEXT,
-        DestinationCountry TEXT,
-        OrderInsertTimestamp TEXT
+        user_id TEXT,
+        merchant_name TEXT,
+        customer_name TEXT,
+        order_id TEXT,
+        store_orderid TEXT,
+        tracking_id TEXT,
+        transaction_status TEXT,
+        carrier TEXT,
+        carrier_service TEXT,
+        final_invoice_amt REAL,
+        invoice_number TEXT,
+        city TEXT,
+        zip_code TEXT,
+        destination_country TEXT,
+        order_insert_timestamp TEXT
     )
     """)
-    db.commit()
-
-def init_db():
-    db = get_db()
-    cur = db.cursor()
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -122,52 +100,32 @@ def init_db():
     )
     """)
 
-    cur.execute("""
+    cur.executescript("""
     CREATE TABLE IF NOT EXISTS chats (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NULL,
+        user_id TEXT NULL,
         is_anonymous INTEGER DEFAULT 0,
-        role TEXT NOT NULL,   -- 'user' or 'assistant'
+        role TEXT NOT NULL,
         message TEXT NOT NULL,
+        message_id TEXT,
         ts REAL DEFAULT (strftime('%s','now')),
         FOREIGN KEY(user_id) REFERENCES users(id)
-    )
+    );
     """)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS client_orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        UserID TEXT,
-        MerchantName TEXT,
-        CustomerName TEXT,
-        OrderID TEXT,
-        TransactionStatus TEXT,
-        TrackingID TEXT,
-        Carrier TEXT,
-        CarrierService TEXT,
-        FinalInvoiceAmt REAL,
-        City TEXT,
-        ZipCode TEXT,
-        DestinationCountry TEXT,
-        OrderInsertTimestamp TEXT
-    )
-    """)
-
-    # store like / dislike feedback per answer
-    cur.execute("""
+    cur.executescript("""
     CREATE TABLE IF NOT EXISTS feedback (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NULL,
-        message_id TEXT,
-        rating INTEGER,          -- 1 for like, -1 for dislike
+        user_id TEXT NULL,
+        message_id TEXT NOT NULL,
+        rating INTEGER,
         question TEXT,
         answer TEXT,
         model_name TEXT,
         ts REAL DEFAULT (strftime('%s','now')),
         FOREIGN KEY(user_id) REFERENCES users(id)
-    )
+    );
     """)
-
     db.commit()
 
 @app.teardown_appcontext
@@ -176,116 +134,13 @@ def close_connection(exception):
     if db is not None:
         db.close()
 
-
 # initialize DB at start
 with app.app_context():
     init_db()
 
-
-# --- NEW: load PDF doc_kb FAISS index once ----------------------------------
-DOC_KB_STORE = None
-DOC_KB_READY = False
-
-
-def load_doc_kb():
-    """Load LangChain FAISS doc_kb index from disk."""
-    global DOC_KB_STORE, DOC_KB_READY
-    if DOC_KB_READY:
-        return DOC_KB_STORE
-
-    if not DOC_KB_DIR.exists():
-        print("[doc_kb] directory not found:", DOC_KB_DIR)
-        DOC_KB_READY = False
-        return None
-
-    try:
-        print("[doc_kb] loading FAISS index from", DOC_KB_DIR)
-        embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME)
-        DOC_KB_STORE = LCFAISS.load_local(
-            str(DOC_KB_DIR),
-            embeddings,
-            allow_dangerous_deserialization=True
-        )
-        DOC_KB_READY = True
-        print("[doc_kb] loaded successfully.")
-    except Exception as e:
-        print("[doc_kb] failed to load:", e)
-        DOC_KB_STORE = None
-        DOC_KB_READY = False
-
-    return DOC_KB_STORE
-
-
-def doc_kb_retrieve(query: str, k: int = 3):
-    """
-    Retrieve top-k chunks from PDF doc KB for a query.
-    Returns list of (page_content, metadata).
-    """
-    store = load_doc_kb()
-    if not store or not query:
-        return []
-
-    try:
-        results = store.similarity_search_with_score(query, k=k)
-    except Exception as e:
-        print("[doc_kb] similarity search error:", e)
-        return []
-
-    cleaned = []
-    for doc, score in results:
-        text = (doc.page_content or "").strip()
-        if not text:
-            continue
-        # simple heuristic: skip extremely short / noisy chunks
-        if len(text) < 40:
-            continue
-        cleaned.append((text, doc.metadata, score))
-
-    return cleaned
-
-
-def build_doc_kb_answer(query: str):
-    """
-    Use PDF KB chunks + LLM (get_ai_response) to build a nice answer.
-    Returns text answer or None if no good chunks.
-    """
-    hits = doc_kb_retrieve(query, k=3)
-    if not hits:
-        return None, None
-
-    # For now we just use the top 2 chunks.
-    top_chunks = hits[:2]
-    context_parts = []
-    sources = []
-    for text, meta, score in top_chunks:
-        source_file = meta.get("source_file") or meta.get("source") or "document"
-        context_parts.append(text)
-        sources.append(source_file)
-
-    context = "\n\n---\n\n".join(context_parts)
-
-    prompt = (
-        "You are ShipCube AI, a supply chain and 3PL assistant. "
-        "Use ONLY the context below to answer the user's question in a clear, concise way.\n\n"
-        f"Context:\n{context}\n\n"
-        f"User question: {query}\n\n"
-        "Answer strictly based on the context above. If the context is not enough, say you are not sure."
-    )
-
-    try:
-        answer = get_ai_response(prompt)
-    except Exception as e:
-        print("[doc_kb] get_ai_response error:", e)
-        return None, None
-
-    sources_str = ", ".join(sorted(set(sources)))
-    return answer, sources_str
-
-
 @app.before_request
 def start_timer():
     g.start_time = time.time()
-
 
 @app.after_request
 def record_request_data(response):
@@ -303,7 +158,6 @@ def record_request_data(response):
     except Exception as e:
         print("Metrics error:", e)
     return response
-
 
 # --- auth routes ------------------------------------------------------------
 @app.route('/register', methods=['GET', 'POST'])
@@ -330,7 +184,6 @@ def register():
                                    mode='register')
     return render_template('login.html', mode='register')
 
-
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -342,11 +195,11 @@ def login():
             (username,)
         ).fetchone()
         if row and check_password_hash(row['password_hash'], password):
+            # store minimal user object in session
             session['user'] = {'id': row['id'], 'username': username}
             return redirect(url_for('index'))
         return render_template('login.html', error='Invalid credentials', mode='login')
     return render_template('login.html', mode='login')
-
 
 @app.route('/logout')
 def logout():
@@ -374,7 +227,7 @@ def feedback():
         return jsonify({'ok': False, 'error': 'Invalid payload'}), 400
 
     user = session.get('user')
-    user_id = user['id'] if user else None
+    user_id = str(user['id']) if user else session.get('_id')
 
     question = data.get('question')
     answer = data.get('answer')
@@ -390,28 +243,72 @@ def feedback():
     return jsonify({'ok': True})
 
 # --- history helpers --------------------------------------------------------
-def append_chat_to_history(role, message, user_session):
-    """Persist message to session or DB depending on login state."""
-    if user_session:
-        user_id = user_session['id']
-        db = get_db()
-        db.execute(
-            "INSERT INTO chats (user_id, is_anonymous, role, message) VALUES (?, 0, ?, ?)",
-            (user_id, role, message)
-        )
-        db.execute("""
-          DELETE FROM chats WHERE id IN (
-            SELECT id FROM chats WHERE user_id=? ORDER BY ts DESC LIMIT -1 OFFSET ?
-          )
-        """, (user_id, USER_HISTORY_LIMIT))
-        db.commit()
-    else:
-        hist = session.get('anon_history', [])
-        hist.append({'role': role, 'message': message, 'ts': time.time()})
-        if len(hist) > ANON_HISTORY_LIMIT:
-            hist = hist[-ANON_HISTORY_LIMIT:]
-        session['anon_history'] = hist
+def make_message_id() -> str:
+    return f"msg-{int(time.time() * 1000)}"
 
+def append_chat_to_history(role, message, user_session, message_id=None):
+    """
+    Save every message to the chats table.
+    If the user is not logged in, store user_id = session token (string) and is_anonymous = 1.
+    `user_session` expected to be either:
+      - dict with 'id' and optional 'is_guest'
+      - None (will be treated as anonymous and a session token created if missing)
+    """
+    db = get_db()
+
+    if user_session:
+        user_id = str(user_session["id"])
+        is_anon = 0 if not user_session.get('is_guest', False) else 1
+    else:
+        # Ensure session token exists so we can correlate anonymous chats
+        if '_id' not in session:
+            session['_id'] = os.urandom(8).hex()
+        user_id = session.get('_id')
+        is_anon = 1
+
+    if message_id is None:
+        message_id = make_message_id()
+
+    db.execute(
+        """
+        INSERT INTO chats (user_id, is_anonymous, role, message, message_id)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (user_id, is_anon, role, message, message_id),
+    )
+
+    # Optional: trim history per user / anon
+    if user_session and not user_session.get('is_guest', False):
+        # logged-in user trimming by integer id still works because user_id stored as TEXT
+        db.execute(
+            """
+            DELETE FROM chats
+            WHERE id IN (
+              SELECT id FROM chats
+              WHERE user_id = ?
+              ORDER BY ts DESC
+              LIMIT -1 OFFSET ?
+            )
+            """,
+            (str(user_session['id']), USER_HISTORY_LIMIT),
+        )
+    else:
+        # anonymous trimming by session token
+        db.execute(
+            """
+            DELETE FROM chats
+            WHERE id IN (
+              SELECT id FROM chats
+              WHERE user_id = ?
+              ORDER BY ts DESC
+              LIMIT -1 OFFSET ?
+            )
+            """,
+            (session.get('_id'), ANON_HISTORY_LIMIT),
+        )
+
+    db.commit()
+    return message_id
 
 def get_history_for_current_user():
     user = session.get('user')
@@ -419,16 +316,23 @@ def get_history_for_current_user():
         db = get_db()
         rows = db.execute(
             "SELECT role, message, ts FROM chats WHERE user_id=? ORDER BY ts ASC",
-            (user['id'],)
+            (str(user['id']),)
         ).fetchall()
         return [{'role': r['role'], 'message': r['message'], 'ts': r['ts']} for r in rows]
     else:
-        return session.get('anon_history', [])
-
+        # return anonymous history for current session token
+        token = session.get('_id')
+        if not token:
+            return []
+        db = get_db()
+        rows = db.execute(
+            "SELECT role, message, ts FROM chats WHERE user_id=? ORDER BY ts ASC",
+            (token,)
+        ).fetchall()
+        return [{'role': r['role'], 'message': r['message'], 'ts': r['ts']} for r in rows]
 
 # --- helper: find order in client_orders -----------------------------------
 ORDER_RE = re.compile(r'\b(\d{5,12})\b')   # naive numeric candidate (5-12 digits)
-
 
 def find_order_in_db(token: str):
     db = get_db()
@@ -450,7 +354,7 @@ def find_order_in_db(token: str):
         order_id,
         store_orderid,
         tracking_id,
-        customername,
+        customer_name,
         merchant_name,
         transaction_status,
         final_invoice_amt,
@@ -478,18 +382,15 @@ def find_order_in_db(token: str):
 
     return dict(row) if row else None
 
-
 # --- main app endpoints -----------------------------------------------------
 @app.route('/')
 def index():
     user = session.get('user')
     return render_template('index.html', user=user)
 
-
 @app.route('/history', methods=['GET'])
 def history():
     return jsonify({'ok': True, 'history': get_history_for_current_user()})
-
 
 @app.route("/faq/top", methods=["GET"])
 def faq_top():
@@ -527,7 +428,6 @@ def faq_top():
     except Exception as e:
         print("faq_top error:", e)
     return jsonify({"ok": True, "items": items})
-
 
 @app.route("/faq/<tag>", methods=["GET"])
 def faq_by_tag(tag):
@@ -573,195 +473,84 @@ def faq_by_tag(tag):
 
 @app.route('/ask', methods=['POST'])
 def ask():
-    global conversation_summary          # 🔹 we mutate this global summary
     ASK_REQUESTS.inc()
     data = request.get_json(silent=True) or {}
     query = (data.get('query') or '').strip()
     icon = data.get('icon')
-    user_session = session.get('user')
 
     if not query and not icon:
         return jsonify({'ok': False, 'response': 'Please send a question.'}), 400
 
-    # ---------- 1) EARLY PRICING GUARD ----------
-    price_keywords = [
-        "charge", "charges", "price", "pricing",
-        "cost", "fee", "rate", "$", "container",
-        "pallet", "handling"
-    ]
-    if any(k in query.lower() for k in price_keywords):
-        if not user_session:
-            msg = (
-                "This information includes detailed pricing. "
-                "Please log in to view exact charges and financial details."
-            )
-            append_chat_to_history('assistant', msg, user_session)
-            return jsonify({
-                "ok": True,
-                "response": {
-                    "question": None,
-                    "answer": msg,
-                    "source": "auth_required_pricing"
-                }
-            })
+    # Ensure we have a session token for anonymous users
+    if 'user' not in session and '_id' not in session:
+        session['_id'] = os.urandom(8).hex()
 
-    # ---------- 2) SAVE USER MESSAGE ----------
-    effective_query = (f"[{icon}] " if icon else "") + query if query else ''
-    append_chat_to_history('user', effective_query, user_session)
+    # Build user object consistently:
+    if 'user' in session:
+        user_obj = session['user']  # e.g. {'id': 5, 'username': 'alice'}
+    else:
+        user_obj = {'id': session.get('_id'), 'is_guest': True}
 
-    # ---------- 3) ORDER / TRACKING HANDLING ----------
-    candidate = None
-    m = ORDER_RE.search(query)
-    if m:
-        candidate = m.group(1)
+    # Append the user's message (always)
+    effective_query = (f"[{icon}] " if icon else "") + query
+    user_msg_id = append_chat_to_history('user', effective_query, user_obj)
 
-    explicit = re.search(r'order\s+(\d{5,12})', query, re.IGNORECASE)
-    if explicit:
-        candidate = explicit.group(1)
+    # Get chat history string for the agent (last N messages for this user/session)
+    chat_history_str = get_session_history(user_obj['id'])
 
-    if candidate:
-        # Not logged in → ask to login
-        if not user_session:
-            msg = (
-                "I detect an order or tracking number. "
-                "Please log in to view order-specific details."
-            )
-            append_chat_to_history('assistant', msg, user_session)
-            return jsonify({
-                'ok': True,
-                'response': {
-                    'question': None,
-                    'answer': msg,
-                    'source': 'auth_required'
-                }
-            })
+    # Route -> refine -> retrieval handled by shipcube_agent
+    response_data = shipcube_agent.process_query(query, chat_history_str, user_obj)
+    answer_text = response_data.get('answer', "Sorry, I couldn't produce an answer.")
+    source = response_data.get('source', 'knowledge_base')
 
-        # Logged in → look up in client_orders
-        order = find_order_in_db(candidate)
-        if order:
-            text = (
-                f"Order {order.get('order_id') or order.get('store_orderid') or candidate}: "
-                f"status {order.get('transaction_status') or 'unknown'}. "
-                f"Customer: {order.get('customername') or 'N/A'}. "
-                f"Merchant: {order.get('merchant_name') or 'N/A'}. "
-                f"Carrier: {order.get('carrier') or order.get('carrier_service') or 'N/A'}. "
-                f"Amount: {order.get('final_invoice_amt') or 'N/A'}. "
-                f"Destination: {order.get('city') or 'N/A'}, "
-                f"Zip: {order.get('zip_code') or 'N/A'}."
-            )
-            append_chat_to_history('assistant', text, user_session)
-            return jsonify({
-                'ok': True,
-                'response': {
-                    'question': f"Order {candidate}",
-                    'answer': text,
-                    'source': 'order_db'
-                }
-            })
-        else:
-            msg = f"No order found for {candidate}."
-            append_chat_to_history('assistant', msg, user_session)
-            return jsonify({
-                'ok': True,
-                'response': {
-                    'question': None,
-                    'answer': msg,
-                    'source': 'order_not_found'
-                }
-            })
-
-    # ---------- 4) SMALL-TALK / GREETING HANDLER ----------
-    smalltalk_patterns = [
-        r'^(hi|hello|hey)\b',
-        r'^(hi|hello shipcube)\b',
-        r'^(how are you)\b',
-        r'^good (morning|afternoon|evening)\b',
-    ]
-    norm_q = query.lower().strip()
-    if any(re.match(p, norm_q) for p in smalltalk_patterns):
-        prompt = (
-            "You are ShipCube AI, a friendly logistics assistant.\n"
-            f"User said: '{query}'.\n"
-            "Respond with a short, warm greeting (1–2 sentences), mention ShipCube, "
-            "and invite them to ask a question about warehouses, logistics or orders."
-        )
-        ai_resp = get_ai_response(prompt)
-        append_chat_to_history('assistant', ai_resp, user_session)
-
-        # update conversation summary with smalltalk reply as well
-        conversation_summary = (conversation_summary + " \n " + ai_resp).strip()
-
-        return jsonify({
-            'ok': True,
-            'response': {
-                'question': None,
-                'answer': ai_resp,
-                'source': 'smalltalk'
-            }
-        })
-
-    # ---------- 5) RAG + GEMINI SUMMARISATION WITH CONTEXT SUMMARY ----------
-    rag_res = None
-    try:
-        # still keep / update the summary (for future use if you want)
-        conversation_summary = summarise_context(conversation_summary) or ""
-
-        # IMPORTANT: pass ONLY the raw user question into retrieval
-        rag_res = generate_answer_from_retrieval(
-            query,          # not query_for_rag
-            top_k=3,
-            score_threshold=0.25,
-        )
-
-    except Exception as e:
-        print("RAG / Gemini error:", e)
-        rag_res = None
-
-    if rag_res and rag_res.get("answer"):
-        answer_text = rag_res["answer"]
-
-        # Build a compact source string for display
-        src_list = [
-            f"{s['source']} (id={s['id']}, score={s['score']:.3f})"
-            for s in rag_res.get("sources", [])
-        ]
-        src_str = ", ".join(src_list) if src_list else "global_kb"
-
-        append_chat_to_history('assistant', answer_text, user_session)
-
-        # extend conversation summary with latest answer
-        conversation_summary = (conversation_summary + " \n " + answer_text).strip()
-
-        return jsonify({
-            'ok': True,
-            'response': {
-                'question': query,       # show the user's actual question, not the augmented one
-                'answer': answer_text,   # Gemini summary based on context
-                'source': src_str,
-            }
-        })
-
-    # ---------- 6) FALLBACK TO LLM ----------
-    ai_resp = get_ai_response(query)
-    append_chat_to_history('assistant', ai_resp, user_session)
-
-    # update conversation summary with fallback answer
-    conversation_summary = (conversation_summary + " \n " + ai_resp).strip()
+    # Append assistant response to history (with a message_id)
+    assistant_msg_id = make_message_id()
+    append_chat_to_history('assistant', answer_text, user_obj, message_id=assistant_msg_id)
 
     return jsonify({
         'ok': True,
         'response': {
-            'question': None,
-            'answer': ai_resp,
-            'source': 'generated'
+            'question': query,
+            'answer': answer_text,
+            'source': source,
+            'user_msg_id': user_msg_id,
+            'assistant_msg_id': assistant_msg_id
         }
     })
+
+def get_session_history(user_id, limit=10):
+    """
+    Fetches the last 'limit' messages for a specific user_id and formats them as a string for the AI model.
+    user_id may be an integer (for logged-in) or a session token string (for anonymous).
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    query = """
+        SELECT role, message 
+        FROM chats 
+        WHERE user_id = ? 
+        ORDER BY ts DESC 
+        LIMIT ?
+    """
+    cursor.execute(query, (str(user_id), limit))
+    rows = cursor.fetchall()
+    conn.close()
+
+    rows = rows[::-1]  # oldest -> newest
+
+    formatted_history = []
+    for role, msg in rows:
+        display_role = "Human" if role == "user" else "AI"
+        formatted_history.append(f"{display_role}: {msg}")
+
+    return "\n".join(formatted_history)
 
 @app.route("/metrics")
 def metrics():
     return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
 
-# Invoice route  with login check
+# Invoice route with login check
 @app.route('/invoice')
 def invoice():
     user = session.get('user')
@@ -769,7 +558,7 @@ def invoice():
         flash("Please log in to access invoices.", "warning")
         return redirect(url_for('login'))
 
-    # TODO: placeholder – Priyanka will implement logic here later to download page
+    # TODO: placeholder – implement invoice download logic later
     return render_template('invoice.html', user=user)
 
 if __name__ == '__main__':
