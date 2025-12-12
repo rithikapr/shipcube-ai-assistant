@@ -502,32 +502,3 @@ def generate_answer_from_retrieval(
     }
 
 
-
-def contextualize_query(chat_history_str, latest_question):
-    """
-        Rewrites the latest question based on chat history to make it standalone.
-        #TODO: CAUTION: This can incur additional LLM costs and need to add a upper limit.
-    """
-    
-    if not chat_history_str:
-        return latest_question
-
-    contextualize_q_prompt = PromptTemplate.from_template(
-        """Given the following conversation and a follow-up question, rephrase the follow-up question to be a standalone question.
-        
-        Chat History:
-        {chat_history}
-        
-        Follow Up Input: {question}
-        
-        Standalone Question:"""
-    )
-    
-    chain = contextualize_q_prompt | llm | StrOutputParser()
-    
-    response = chain.invoke({
-        "chat_history": chat_history_str,
-        "question": latest_question
-    })
-    
-    return response
