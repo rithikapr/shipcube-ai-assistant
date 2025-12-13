@@ -55,9 +55,9 @@ class RAGAgent:
             
             User Input: {query}
             Output JSON only:
-            {
+            {{
                 "type": "routing"
-            }
+            }}
         """
 
         self.router_chain = (
