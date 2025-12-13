@@ -9,6 +9,8 @@ from sentence_transformers import SentenceTransformer
 from langchain_community.vectorstores import FAISS as LCFAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
 # ---------------------------------------------------------------------
 # Config
@@ -20,8 +22,8 @@ DATA_DIR = BASE_DIR / "data"
 QNA_JSON_PATH = DATA_DIR / "qna.json"
 GLOBAL_KB_DIR = DATA_DIR / "global_kb"    # unified KB (PDF chunks + FAQ)
 
-# MUST match embed model used when building the KB (build_global_kb.py)
-MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "sentence-transformers/all-mpnet-base-v2")
+# MUST match EMBED_MODEL_NAME in build_global_kb.py
+MODEL_NAME = "sentence-transformers/all-mpnet-base-v2"
 
 # ---------------------------------------------------------------------
 # Globals
@@ -409,3 +411,5 @@ def generate_answer_from_retrieval(
         "sources": cited_sources,
         "used_context": context_text,
     }
+
+

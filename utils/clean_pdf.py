@@ -27,7 +27,7 @@ NUMERIC_RATIO_THRESHOLD = 0.60
 def normalize_whitespace_and_hyphenation(text: str) -> str:
     if not text:
         return text
-
+    
     text = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", text)
     text = re.sub(r"\s*\n\s*", " ", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
@@ -37,7 +37,7 @@ def normalize_whitespace_and_hyphenation(text: str) -> str:
 def line_noise_scores(line: str) -> tuple[float, float]:
     if not line:
         return 1.0, 1.0
-
+    
     chars = len(line)
     punct = sum(1 for c in line if not c.isalnum() and not c.isspace())
     digits = sum(1 for c in line if c.isdigit())

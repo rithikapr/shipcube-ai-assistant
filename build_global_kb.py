@@ -8,7 +8,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
-from utils.clean_pdf import clean_docs 
+from utils.clean_pdf import clean_docs
 
 PDF_DIR = Path("data/pdfs")
 KB_DIR = Path("data/global_kb")   # unified index (PDF + FAQ)
@@ -54,6 +54,8 @@ def load_qna_docs_from_json():
     print(f"[faq] Loaded {len(docs)} FAQ docs from qna.json")
     return docs
 
+
+
 def load_all_pdfs(pdf_dir: Path):
     docs = []
     for pdf_path in pdf_dir.glob("*.pdf"):
@@ -65,8 +67,11 @@ def load_all_pdfs(pdf_dir: Path):
             d.metadata.setdefault("source_file", pdf_path.name)
         docs.extend(pdf_docs)
 
-
+    print(f"Total PDF pages loaded: {len(docs)}")
     return docs
+
+
+
 
 # ------------------ Main KB build ------------------ #
 def main():

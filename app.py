@@ -13,10 +13,13 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from utils.ai_model import (
     get_ai_response,
     get_top_faq,
-    get_items_for_tag
+    get_items_for_tag    
 )
-from utils.rag_pipeline import shipcube_agent
+from utils.rag_pipeline import shipcube_agent 
+from langchain_community.vectorstores import FAISS as LCFAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
 
 DB_PATH = os.environ.get('DB_PATH', 'data/shipcube.db')
 ANON_HISTORY_LIMIT = 100
@@ -471,6 +474,7 @@ def faq_by_tag(tag):
         print("faq_by_tag error:", e)
     return jsonify({"ok": True, "items": items})
 
+
 @app.route('/ask', methods=['POST'])
 def ask():
     ASK_REQUESTS.inc()
@@ -481,40 +485,31 @@ def ask():
     if not query and not icon:
         return jsonify({'ok': False, 'response': 'Please send a question.'}), 400
 
-    # Ensure we have a session token for anonymous users
-    if 'user' not in session and '_id' not in session:
-        session['_id'] = os.urandom(8).hex()
-
-    # Build user object consistently:
     if 'user' in session:
-        user_obj = session['user']  # e.g. {'id': 5, 'username': 'alice'}
+        user_obj = session['user']
+        user_id = user_obj['id']
     else:
-        user_obj = {'id': session.get('_id'), 'is_guest': True}
+        if '_id' not in session:
+            session['_id'] = os.urandom(4).hex()
+        user_id = session['_id']
+        user_obj = {'id': user_id, 'is_guest': True}
 
-    # Append the user's message (always)
+    
     effective_query = (f"[{icon}] " if icon else "") + query
-    user_msg_id = append_chat_to_history('user', effective_query, user_obj)
+    append_chat_to_history('user', effective_query, user_obj)
 
-    # Get chat history string for the agent (last N messages for this user/session)
-    chat_history_str = get_session_history(user_obj['id'])
-
-    # Route -> refine -> retrieval handled by shipcube_agent
+    chat_history_str = get_session_history(user_id)
     response_data = shipcube_agent.process_query(query, chat_history_str, user_obj)
-    answer_text = response_data.get('answer', "Sorry, I couldn't produce an answer.")
-    source = response_data.get('source', 'knowledge_base')
 
-    # Append assistant response to history (with a message_id)
-    assistant_msg_id = make_message_id()
-    append_chat_to_history('assistant', answer_text, user_obj, message_id=assistant_msg_id)
+    answer_text = response_data['answer']
+    append_chat_to_history('assistant', answer_text, user_obj)
 
     return jsonify({
         'ok': True,
         'response': {
             'question': query,
             'answer': answer_text,
-            'source': source,
-            'user_msg_id': user_msg_id,
-            'assistant_msg_id': assistant_msg_id
+            'source': response_data['source']
         }
     })
 
@@ -560,6 +555,38 @@ def invoice():
 
     # TODO: placeholder – implement invoice download logic later
     return render_template('invoice.html', user=user)
+
+
+def get_session_history(user_id, limit=10):
+    """
+        Fetches the last 'limit' messages for a specific user_id and formats them as a string for the AI model.
+
+    """
+
+    conn = sqlite3.connect('data/shipcube.db')
+    cursor = conn.cursor()
+    
+    query = """
+        SELECT role, message 
+        FROM chats 
+        WHERE user_id = ? 
+        ORDER BY ts DESC 
+        LIMIT ?
+    """
+    cursor.execute(query, (user_id, limit))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    rows = rows[::-1]
+    
+    formatted_history = []
+    for role, msg in rows:
+        display_role = "Human" if role == "user" else "AI"
+        formatted_history.append(f"{display_role}: {msg}")
+        
+    return "\n".join(formatted_history)
+
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
