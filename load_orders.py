@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-Load orders Excel/CSV into sqlite and normalize column names.
+Load orders Excel/CSV into sqlite using ShipCube client_orders schema.
 
 Usage:
     python load_orders.py path/to/orders.xlsx
-
-Creates:
-  - data/shipcube.db (if not existing)
-  - table: client_orders (recreated)
-  - data/col_map.json (original -> normalized mapping)
 """
+
 import sys
 import os
 import sqlite3
@@ -22,144 +18,170 @@ from tqdm import tqdm
 DB_PATH = Path("data/shipcube.db")
 TABLE_NAME = "client_orders"
 MAPPING_PATH = Path("data/col_map.json")
-CHUNK = 1000  # commit every N rows
+CHUNK = 1000
+
+
+# ------------------ Helpers ------------------
 
 def to_snake(s: str) -> str:
-    if s is None:
+    if not s:
         return ""
     s = s.strip()
-    s = s.replace('\n',' ').replace('\r',' ')
-    # common replacements
-    s = s.replace('(UTC)','').replace('(Added 50 Cents)','')
-    s = re.sub(r'[^0-9A-Za-z]+', '_', s)           # anything non-alnum -> underscore
-    s = re.sub(r'_{2,}', '_', s)                   # collapse multiple underscores
-    s = s.strip('_').lower()
-    # ensure starts with letter
-    if not re.match(r'^[a-z]', s):
-        s = 'c_' + s
+    s = s.replace("\n", " ").replace("\r", " ")
+    s = re.sub(r"[^0-9A-Za-z]+", "_", s)
+    s = re.sub(r"_+", "_", s)
+    s = s.strip("_").lower()
+    if not re.match(r"^[a-z]", s):
+        s = "c_" + s
     return s
 
-def dataframe_to_sqlite(df: pd.DataFrame, db_path: Path, table_name: str):
-    os.makedirs(db_path.parent, exist_ok=True)
-    con = sqlite3.connect(str(db_path))
-    cur = con.cursor()
+def normalize_value(val):
+    """Convert pandas / numpy values into SQLite-safe types."""
+    if pd.isna(val):
+        return None
 
-    # Normalize columns
+    # pandas Timestamp or datetime
+    if isinstance(val, (pd.Timestamp,)):
+        return val.isoformat()
+
+    return val
+
+# ------------------ Canonical schema ------------------
+
+CANONICAL_COLUMNS = {
+    "shipping_label_id": ["shipping_label_id", "label_id"],
+    "order_date": ["order_date", "order date"],
+    "order_number": ["order_number", "order no", "order number"],
+    "quantity_shipped": ["quantity_shipped", "qty shipped", "quantity"],
+    "order_id": ["order_id"],
+    "carrier": ["carrier"],
+    "shipping_method": ["shipping_method", "service", "method"],
+    "tracking_number": ["tracking_number", "tracking no", "tracking"],
+    "created_at": ["created_at", "created date"],
+    "to_name": ["to_name", "customer", "recipient"],
+    "final_amount": ["final_amount", "amount", "invoice amount", "total"],
+    "zip": ["zip", "zipcode", "postal"],
+    "state": ["state"],
+    "country": ["country"],
+    "size_dimensions": ["size", "dimensions"],
+    "weight_oz": ["weight", "weight_oz"],
+    "tpl_customer": ["3pl customer", "tpl customer", "client"],
+    "warehouse": ["warehouse"]
+}
+
+
+# ------------------ DB Schema ------------------
+
+CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS client_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shipping_label_id TEXT,
+    order_date TEXT,
+    order_number TEXT,
+    quantity_shipped INTEGER,
+    order_id TEXT,
+    carrier TEXT,
+    shipping_method TEXT,
+    tracking_number TEXT,
+    created_at TEXT,
+    to_name TEXT,
+    final_amount REAL,
+    zip TEXT,
+    state TEXT,
+    country TEXT,
+    size_dimensions TEXT,
+    weight_oz REAL,
+    tpl_customer TEXT,
+    warehouse TEXT
+)
+"""
+
+
+# ------------------ Core Loader ------------------
+
+def dataframe_to_sqlite(df: pd.DataFrame):
+    os.makedirs(DB_PATH.parent, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    # Normalize dataframe columns
     orig_cols = list(df.columns)
-    normalized = [to_snake(c) for c in orig_cols]
+    norm_cols = {c: to_snake(c) for c in orig_cols}
 
-    # If duplicate normalized names occur, make them unique by appending index
-    seen = {}
-    final_cols = []
-    for name in normalized:
-        base = name
-        idx = 1
-        while name in seen:
-            idx += 1
-            name = f"{base}_{idx}"
-        seen[name] = True
-        final_cols.append(name)
-
-    # Build mapping
-    col_map = {orig: norm for orig, norm in zip(orig_cols, final_cols)}
-
-    # Drop table if exists (we recreate clean)
-    cur.execute(f'DROP TABLE IF EXISTS "{table_name}"')
-
-    # Create table with TEXT columns
-    col_defs = ", ".join([f'"{col}" TEXT' for col in final_cols])
-    create_sql = f'CREATE TABLE "{table_name}" (id INTEGER PRIMARY KEY AUTOINCREMENT, {col_defs})'
-    cur.execute(create_sql)
-    con.commit()
-    # Build insert SQL safely
-    col_list = ", ".join([f'"{c}"' for c in final_cols])
-    placeholders = ", ".join(["?"] * len(final_cols))
-    insert_sql = f'INSERT INTO "{table_name}" ({col_list}) VALUES ({placeholders})'
-
-    total = len(df)
-    print(f"Inserting {total} rows into {db_path}/{table_name} ...")
-    rows = df.fillna("").astype(str)
-    batch = []
-    count = 0
-    for idx, row in tqdm(rows.iterrows(), total=total):
-        vals = [row[orig_cols[i]] for i in range(len(orig_cols))]
-        batch.append(vals)
-        if len(batch) >= CHUNK:
-            cur.executemany(insert_sql, batch)
-            con.commit()
-            count += len(batch)
-            batch = []
-    if batch:
-        cur.executemany(insert_sql, batch)
-        con.commit()
-        count += len(batch)
-
-    print(f"Inserted {count} rows.")
-
-    # Create indexes on likely lookup fields if they exist in final_cols
-    # common names we will look for (converted to snake)
-    candidates = {
-        "order_id": ["order id","orderid","order_id","order_id_1","c_order_id"],
-        "store_order_id": ["store orderid","storeorderid","store_orderid","store_order_id"],
-        "tracking_id": ["tracking id","trackingid","tracking_id"],
-        "invoice_number": ["invoice number","invoice_number","invoice"],
-        "merchant_name": ["merchant name","merchant_name","merchant"]
-    }
-    created_indexes = []
-    for logical, variants in candidates.items():
-        for var in variants:
-            norm = to_snake(var)
-            # if mapping produced a column matching the variant, use it
-            # but better: check final_cols for substring or exact match
-            matched = None
-            # exact first
-            if norm in final_cols:
-                matched = norm
-            else:
-                # fuzzy: look for any final_col that contains tokens
-                tokens = [t for t in re.split(r'[_\s]+', norm) if t]
-                for fc in final_cols:
-                    if all(tok in fc for tok in tokens):
-                        matched = fc
-                        break
-            if matched:
-                idx_name = f"idx_{table_name}_{matched}"
-                try:
-                    cur.execute(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{table_name}"("{matched}")')
-                    created_indexes.append(matched)
-                except Exception as e:
-                    print("Index creation failed for", matched, e)
+    # Build mapping → canonical schema
+    resolved_map = {}
+    for canonical, variants in CANONICAL_COLUMNS.items():
+        for col, norm in norm_cols.items():
+            if norm in [to_snake(v) for v in variants]:
+                resolved_map[canonical] = col
                 break
 
-    con.commit()
-    con.close()
+    # Recreate table
+    cur.execute("DROP TABLE IF EXISTS client_orders")
+    cur.execute(CREATE_TABLE_SQL)
+    conn.commit()
+
+    insert_cols = list(resolved_map.keys())
+    placeholders = ", ".join(["?"] * len(insert_cols))
+    insert_sql = f"""
+        INSERT INTO client_orders ({", ".join(insert_cols)})
+        VALUES ({placeholders})
+    """
+
+    total = len(df)
+    print(f"Inserting {total} rows into client_orders...")
+
+    batch = []
+    for _, row in tqdm(df.iterrows(), total=total):
+        vals = []
+        for col in insert_cols:
+            src = resolved_map.get(col)
+            raw = row[src] if src else None
+            vals.append(normalize_value(raw))
+
+        batch.append(vals)
+
+        if len(batch) >= CHUNK:
+            cur.executemany(insert_sql, batch)
+            conn.commit()
+            batch = []
+
+    if batch:
+        cur.executemany(insert_sql, batch)
+        conn.commit()
+
+    conn.close()
 
     # Save mapping
-    with open(MAPPING_PATH, "w", encoding="utf-8") as fh:
-        json.dump({"mapping": col_map, "created_indexes": created_indexes}, fh, indent=2)
+    with open(MAPPING_PATH, "w", encoding="utf-8") as f:
+        json.dump(resolved_map, f, indent=2)
 
-    print("Column mapping saved to", MAPPING_PATH)
-    print("Indexes created on:", created_indexes)
+    print(" Load complete")
+    print(" Column mapping saved to:", MAPPING_PATH)
+
+
+# ------------------ Main ------------------
 
 def main(argv):
     if len(argv) < 2:
         print("Usage: python load_orders.py path/to/orders.xlsx")
         return 1
+
     path = Path(argv[1])
     if not path.exists():
         print("File not found:", path)
         return 1
 
-    # read with pandas (auto detects xlsx/csv)
-    print("Reading file:", path)
+    print("Reading:", path)
     if path.suffix.lower() in [".xls", ".xlsx"]:
-        df = pd.read_excel(str(path), engine="openpyxl")
+        df = pd.read_excel(path, engine="openpyxl")
     else:
-        df = pd.read_csv(str(path))
+        df = pd.read_csv(path)
 
-    print("Columns found:", list(df.columns)[:20])
-    dataframe_to_sqlite(df, DB_PATH, TABLE_NAME)
+    print("Detected columns:", list(df.columns))
+    dataframe_to_sqlite(df)
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv))

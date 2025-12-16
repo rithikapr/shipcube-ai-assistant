@@ -1,26 +1,19 @@
 {
-  "mapping": {
-    "Shipping Label ID": "shipping_label_id",
-    "Order date": "order_date",
-    "Order Number": "order_number",
-    "Quantity shipped": "quantity_shipped",
-    "Order ID": "order_id",
-    "Carrier": "carrier",
-    "Shipping Method": "shipping_method",
-    "Tracking Number": "tracking_number",
-    "Created at": "created_at",
-    "To Name ": "to_name",
-    "Final Amount": "final_amount",
-    "Zip": "zip",
-    "State": "state",
-    "Country": "country",
-    "Size (Length x Width x Height) (in)": "size_length_x_width_x_height_in",
-    "Weight (oz)": "weight_oz",
-    "3PL Customer": "c_3pl_customer",
-    "Warehouse": "warehouse",
-    "Order Tags": "order_tags"
-  },
-  "created_indexes": [
-    "order_id"
-  ]
+  "shipping_label_id": "Shipping Label ID",
+  "order_date": "Order date",
+  "order_number": "Order Number",
+  "quantity_shipped": "Quantity shipped",
+  "order_id": "Order ID",
+  "carrier": "Carrier",
+  "shipping_method": "Shipping Method",
+  "tracking_number": "Tracking Number",
+  "created_at": "Created at",
+  "to_name": "To Name ",
+  "final_amount": "Final Amount",
+  "zip": "Zip",
+  "state": "State",
+  "country": "Country",
+  "weight_oz": "Weight (oz)",
+  "tpl_customer": "3PL Customer",
+  "warehouse": "Warehouse"
 }

@@ -11,6 +11,9 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
+
 
 # ---------------------------------------------------------------------
 # Config
@@ -413,3 +416,64 @@ def generate_answer_from_retrieval(
     }
 
 
+ORDER_INTENT_PROMPT = PromptTemplate.from_template("""
+You are classifying a user's intent when asking about an order.
+
+Order intents:
+1. BASIC_ORDER_INFO
+   - shipment status
+   - where is my order
+   - tracking
+   - carrier
+   - delivery status
+
+2. DETAILED_ORDER_INFO
+   - invoice
+   - price
+   - amount
+   - weight
+   - dimensions
+   - warehouse
+   - customer address
+   - internal or financial details
+
+User question:
+{query}
+
+Respond ONLY in JSON:
+{{
+  "intent": "BASIC_ORDER_INFO" | "DETAILED_ORDER_INFO"
+}}
+""")
+
+
+def classify_order_intent(llm, question: str) -> dict:
+    prompt = ORDER_INTENT_PROMPT.format(query=question)
+    response = llm.invoke(prompt)
+
+    content = response.content if hasattr(response, "content") else str(response)
+
+    try:
+        return json.loads(content)
+    except Exception as e:
+        print("[intent parse error]", content)
+        return {"intent": "BASIC_ORDER_INFO"}
+
+BASIC_RESPONSE_PROMPT = """
+You are a customer support assistant.
+
+Using ONLY the information below, answer the user's question clearly.
+Do NOT infer or add missing details.
+
+Order data:
+{order_data}
+"""
+
+DETAILED_RESPONSE_PROMPT = """
+You are a customer support assistant.
+
+Provide a complete and professional response using the order data below.
+
+Order data:
+{order_data}
+"""

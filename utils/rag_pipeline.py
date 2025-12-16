@@ -3,11 +3,98 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from utils.ai_model import generate_answer_from_retrieval
 import dotenv
+import json
+import re
+from flask import g
+import sqlite3
+from utils.ai_model import (
+    classify_order_intent,
+    BASIC_RESPONSE_PROMPT,
+    DETAILED_RESPONSE_PROMPT
+)
 
 
 dotenv.load_dotenv()
 
+ORDER_ID_RE = re.compile(r"\b\d{5,15}(?:\.0)?\b")
 
+BASIC_FIELDS = {
+    "order_number",
+    "order_date",
+    "carrier",
+    "shipping_method",
+    "tracking_number",
+}
+
+DETAILED_FIELDS = {
+    "to_name",
+    "zip",
+    "state",
+    "country",
+    "warehouse",
+    "tpl_customer",
+    "size_dimensions",
+    "weight_oz",
+    "final_amount",
+}
+
+
+def apply_data_policy(order: dict, intent: str) -> dict:
+    allowed = (
+        BASIC_FIELDS | DETAILED_FIELDS
+        if intent == "DETAILED_ORDER_INFO"
+        else BASIC_FIELDS
+    )
+    return {k: v for k, v in order.items() if k in allowed}
+
+
+def get_db():
+    return sqlite3.connect("data/shipcube.db")
+
+def normalize_order_token(token: str):
+    """
+    Handles Excel numeric artifacts like 696381280.0
+    """
+    token = token.strip()
+    variants = {token}
+
+    # if pure digits → add .0 variant
+    if token.isdigit():
+        variants.add(f"{token}.0")
+
+    # if ends with .0 → add integer variant
+    if token.endswith(".0"):
+        variants.add(token[:-2])
+
+    return list(variants)
+    
+def find_order_in_db(order_token: str):
+    conn = sqlite3.connect("data/shipcube.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    token = order_token.strip()
+    variants = {token}
+
+    if token.isdigit():
+        variants.add(f"{token}.0")
+    if token.endswith(".0"):
+        variants.add(token[:-2])
+
+    variants = list(variants)
+
+    cur.execute(f"""
+        SELECT *
+        FROM client_orders
+        WHERE order_id IN ({','.join('?'*len(variants))})
+           OR order_number IN ({','.join('?'*len(variants))})
+           OR tracking_number IN ({','.join('?'*len(variants))})
+        LIMIT 1
+    """, variants * 3)
+
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 """
 *   @brief Create a RAG Agent that routes queries, refines them, and retrieves answers.
@@ -105,8 +192,46 @@ class RAGAgent:
 
     """
 
+
     def process_query(self, user_query, chat_history_str, user_obj):
         try:
+            order_match = ORDER_ID_RE.search(user_query)
+            if order_match:
+                order_token = order_match.group()
+                print("[DEBUG] order token:", order_token)
+
+                order = find_order_in_db(order_token)
+                print("[DEBUG] order found:", bool(order))
+
+                if not order:
+                    return {
+                        "answer": f"I couldn’t find any order with ID {order_token}. Please check the number.",
+                        "source": "client_orders",
+                        "original_query": user_query
+                    }
+
+                intent_result = classify_order_intent(self.llm, user_query)
+                intent = intent_result.get("intent", "BASIC_ORDER_INFO")
+
+                filtered_order = apply_data_policy(order, intent)
+
+                prompt = (
+                    DETAILED_RESPONSE_PROMPT
+                    if intent == "DETAILED_ORDER_INFO"
+                    else BASIC_RESPONSE_PROMPT
+                )
+
+                response = self.llm.invoke(
+                    prompt.format(order_data=json.dumps(filtered_order, indent=2))
+                )
+
+                return {
+                    "answer": response.content,
+                    "source": "client_orders",
+                    "original_query": user_query
+                }
+
+            # ---------------- ORDER-AWARE LOGIC END ----------------
             route = self.router_chain.invoke({"query": user_query})
             
             # Robust check for small_talk type
@@ -125,7 +250,7 @@ class RAGAgent:
                         "source": "auth_required",
                         "original_query": user_query
                     }
-                
+            
             refined_query = self.refine_chain.invoke({
                 "chat_history": chat_history_str,
                 "question": user_query
@@ -133,7 +258,8 @@ class RAGAgent:
             
             print(f" [Agent] Original: {user_query} | Refined: {refined_query}")
 
-            rag_response = generate_answer_from_retrieval(refined_query)
+            rag_response = generate_answer_from_retrieval(refined_query) or {}
+
             
             if rag_response and "sources" in rag_response:
                 sources = ", ".join([s['source'] for s in rag_response.get("sources", [])])
@@ -141,10 +267,11 @@ class RAGAgent:
                 sources = "knowledge_base"
 
             return {
-                "answer": rag_response.get('answer', "I couldn't generate an answer."),
+                "answer": rag_response.get("answer", "I don't know."),
                 "source": sources,
-                "original_query": refined_query 
+                "original_query": refined_query
             }
+
 
         except Exception as e:
             print(f" [Agent Error] {e}")

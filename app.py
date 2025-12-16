@@ -72,27 +72,32 @@ def init_db():
     db = get_db()
     cur = db.cursor()
 
-    # client_orders table: snake_case column names to match normalized loader (user_id TEXT to allow anon token)
+    # cur.execute("""
+    # DROP TABLE IF EXISTS client_orders """)
+
+    # client_orders table
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client_orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        merchant_name TEXT,
-        customer_name TEXT,
-        order_id TEXT,
-        store_orderid TEXT,
-        tracking_id TEXT,
-        transaction_status TEXT,
-        carrier TEXT,
-        carrier_service TEXT,
-        final_invoice_amt REAL,
-        invoice_number TEXT,
-        city TEXT,
-        zip_code TEXT,
-        destination_country TEXT,
-        order_insert_timestamp TEXT
-    )
-    """)
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shipping_label_id TEXT,
+    order_date TEXT,
+    order_number TEXT,
+    quantity_shipped INTEGER,
+    order_id TEXT,
+    carrier TEXT,
+    shipping_method TEXT,
+    tracking_number TEXT,
+    created_at TEXT,
+    to_name TEXT,
+    final_amount REAL,
+    zip TEXT,
+    state TEXT,
+    country TEXT,
+    size_dimensions TEXT,   -- Length x Width x Height (in)
+    weight_oz REAL,
+    tpl_customer TEXT,      -- 3PL Customer
+    warehouse TEXT)""")
+#    order_tags TEXT 
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -337,53 +342,6 @@ def get_history_for_current_user():
 # --- helper: find order in client_orders -----------------------------------
 ORDER_RE = re.compile(r'\b(\d{9})\b')   # naive numeric candidate (9 digits)
 
-def find_order_in_db(token: str):
-    db = get_db()
-    t = (token or "").strip()
-
-    variants = {t}
-
-    if re.fullmatch(r"\d+", t):
-        variants.add(f"{t}.0")
-    elif re.fullmatch(r"\d+\.0", t):
-        variants.add(t.split(".")[0])
-
-    var_list = list(variants)
-    while len(var_list) < 2:
-        var_list.append(var_list[0])
-
-    q = """
-      SELECT
-        order_id,
-        store_orderid,
-        tracking_id,
-        customer_name,
-        merchant_name,
-        transaction_status,
-        final_invoice_amt,
-        city,
-        zip_code,
-        carrier,
-        carrier_service
-      FROM client_orders
-      WHERE order_id IN (?, ?)
-         OR store_orderid IN (?, ?)
-         OR tracking_id = ?
-         OR invoice_number = ?
-      LIMIT 1
-    """
-
-    row = db.execute(
-        q,
-        (
-            var_list[0], var_list[1],
-            var_list[0], var_list[1],
-            t,
-            t,
-        ),
-    ).fetchone()
-
-    return dict(row) if row else None
 
 # --- main app endpoints -----------------------------------------------------
 @app.route('/')
