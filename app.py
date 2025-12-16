@@ -475,6 +475,11 @@ def faq_by_tag(tag):
     return jsonify({"ok": True, "items": items})
 
 
+def markdown_bold_to_html(text: str) -> str:
+    return re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", text)
+
+
+
 @app.route('/ask', methods=['POST'])
 def ask():
     ASK_REQUESTS.inc()
@@ -503,6 +508,8 @@ def ask():
 
     answer_text = response_data['answer']
     append_chat_to_history('assistant', answer_text, user_obj)
+
+    answer_text = markdown_bold_to_html(answer_text)
 
     return jsonify({
         'ok': True,

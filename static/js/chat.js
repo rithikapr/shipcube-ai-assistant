@@ -49,7 +49,11 @@ function addBubble(text, role = "ai", meta) {
   }
 
   const textDiv = el("div", "bubble-text");
-  textDiv.innerHTML = escapeHtml(text || "");
+  if (role === "ai") {
+    textDiv.innerHTML = text || "";
+  } else {
+    textDiv.textContent = text || "";
+  }
   bubble.appendChild(textDiv);
 
   if (meta && meta.source) {
