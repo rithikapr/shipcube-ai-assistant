@@ -318,7 +318,7 @@ def generate_answer_from_retrieval(
         return {"query": query, "answer": "Please provide a question.", "sources": [], "used_context": ""}
 
     # 0) semantic FAQ
-    sem = semantic_faq_match(query, top_k=3, threshold=0.67)
+    sem = semantic_faq_match(query, top_k=5, threshold=0.67)
     if sem:
         item, score = sem
         q_text = item.get("Question") or item.get("question") or ""
