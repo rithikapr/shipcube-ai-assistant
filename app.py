@@ -335,7 +335,7 @@ def get_history_for_current_user():
         return [{'role': r['role'], 'message': r['message'], 'ts': r['ts']} for r in rows]
 
 # --- helper: find order in client_orders -----------------------------------
-ORDER_RE = re.compile(r'\b(\d{5,12})\b')   # naive numeric candidate (5-12 digits)
+ORDER_RE = re.compile(r'\b(\d{9})\b')   # naive numeric candidate (9 digits)
 
 def find_order_in_db(token: str):
     db = get_db()
