@@ -17,7 +17,7 @@ from utils.ai_model import (
 dotenv.load_dotenv()
 
 ORDER_ID_RE = re.compile(
-    r"(order|tracking)\s*(id|number)?\s*[:#]?\s*(\d{8,12}(?:\.0)?)",
+    r"(order|tracking)\s*(id|number)?\s*[:#]?\s*(\d{9})(?:\.0)?",
     re.I
 )
 
@@ -85,15 +85,22 @@ def find_order_in_db(order_token: str):
         variants.add(token[:-2])
 
     variants = list(variants)
+    normalized_variants = []
+    for v in variants:
+        try:
+            normalized_variants.append(int(float(v)))
+        except Exception:
+            normalized_variants.append(v)
 
     cur.execute(f"""
-        SELECT *
-        FROM client_orders
-        WHERE order_id IN ({','.join('?'*len(variants))})
-           OR order_number IN ({','.join('?'*len(variants))})
-           OR tracking_number IN ({','.join('?'*len(variants))})
-        LIMIT 1
-    """, variants * 3)
+    SELECT *
+    FROM client_orders
+    WHERE CAST(order_id AS INTEGER) IN ({','.join('?' * len(normalized_variants))})
+       OR order_number IN ({','.join('?' * len(normalized_variants))})
+       OR tracking_number IN ({','.join('?' * len(normalized_variants))})
+    LIMIT 1
+""", normalized_variants * 3)
+
 
     row = cur.fetchone()
     conn.close()
@@ -131,24 +138,36 @@ class RAGAgent:
         )
         
         router_template = """
-            You are the primary router for the ShipCube AI assistant. 
-            Classify the User Input into one of two categories:
-            
-            1. "small_talk": For greetings, compliments, "how are you", or off-topic chitchat.
-            OUTPUT: {{"type": "small_talk", "response": "Your friendly, conversational response here."}}
+            You are the primary router for the ShipCube AI assistant.
+            Classify the User Input into exactly ONE of the following categories.
 
-            2. "pricing": Questions about costs, fees, rates, charges, invoices, or billing.
-            OUTPUT: {{"type": "pricing"}}
-            
-            3. "technical": For questions about ShipCube services, pricing, warehousing, logistics concepts, or specific facilities.
-            OUTPUT: {{"type": "technical"}}
-            
+            Return ONLY valid JSON. Do NOT include explanations or extra text.
+
+            1. "small_talk":
+            Greetings, compliments, casual conversation.
+            OUTPUT:
+            {{"type": "small_talk", "response": "Your friendly reply here"}}
+
+            2. "pricing":
+            Questions about costs, rates, fees, invoices, billing.
+            OUTPUT:
+            {{"type": "pricing"}}
+
+            3. "order_tracking":
+            Questions about locating orders, shipment status, tracking IDs, delivery.
+            OUTPUT:
+            {{"type": "order_tracking"}}
+
+            4. "technical":
+            Questions about ShipCube services, warehousing, logistics, facilities.
+            OUTPUT:
+            {{"type": "technical"}}
+
             User Input: {query}
-            Output JSON only:
-            {{
-                "type": "routing"
-            }}
-        """
+
+            Return JSON ONLY.
+            """
+
 
         self.router_chain = (
             PromptTemplate.from_template(router_template) 
@@ -198,9 +217,23 @@ class RAGAgent:
 
     def process_query(self, user_query, chat_history_str, user_obj):
         try:
+            # ---------- ORDER ID DETECTION ----------
             order_match = ORDER_ID_RE.search(user_query)
+
+            # User intent is order-related BUT no valid 9-digit ID
+            if any(k in user_query.lower() for k in ["order", "track", "tracking"]) and not order_match:
+                return {
+                    "answer": (
+                        "Please enter a valid **9-digit Order ID**.\n\n"
+                        "Example: `696292323`"
+                    ),
+                    "source": "order_tracking",
+                    "original_query": user_query
+                }
+
+            # ---------- ORDER FOUND ----------
             if order_match:
-                order_token = order_match.group()
+                order_token = order_match.group(3).strip()
                 print("[DEBUG] order token:", order_token)
 
                 order = find_order_in_db(order_token)
@@ -208,7 +241,10 @@ class RAGAgent:
 
                 if not order:
                     return {
-                        "answer": f"I couldn’t find any order with ID {order_token}. Please check the number.",
+                        "answer": (
+                            f"I couldn’t find any order with ID **{order_token}**. "
+                            "Please check the number."
+                        ),
                         "source": "client_orders",
                         "original_query": user_query
                     }
@@ -234,40 +270,41 @@ class RAGAgent:
                     "original_query": user_query
                 }
 
-            # ---------------- ORDER-AWARE LOGIC END ----------------
+            # ---------- NORMAL ROUTING ----------
             route = self.router_chain.invoke({"query": user_query})
-            
-            # Robust check for small_talk type
-            if isinstance(route, dict) and route.get('type') == 'small_talk':
+
+            if isinstance(route, dict) and route.get("type") == "small_talk":
                 return {
-                    "answer": route.get('response', "Hello! How can I help you with ShipCube?"),
+                    "answer": route.get("response", "Hello! How can I help you with ShipCube?"),
                     "source": "small_talk",
                     "original_query": user_query
                 }
 
-            # ROUTE 2: PRICING GUARDRAIL
-            if isinstance(route, dict) and route.get('type') == 'pricing':
-                if user_obj.get('is_guest', False):
+            if isinstance(route, dict) and route.get("type") == "pricing":
+                if user_obj.get("is_guest", False):
                     return {
-                        "answer": "This query involves detailed pricing information. Please **log in** to view exact charges, rates, and financial details.",
+                        "answer": (
+                            "This query involves detailed pricing information. "
+                            "Please **log in** to view exact charges and rates."
+                        ),
                         "source": "auth_required",
                         "original_query": user_query
                     }
-            
+
             refined_query = self.refine_chain.invoke({
                 "chat_history": chat_history_str,
                 "question": user_query
             })
-            
-            print(f" [Agent] Original: {user_query} | Refined: {refined_query}")
+
+            print(f"[Agent] Original: {user_query} | Refined: {refined_query}")
 
             rag_response = generate_answer_from_retrieval(refined_query) or {}
 
-            
-            if rag_response and "sources" in rag_response:
-                sources = ", ".join([s['source'] for s in rag_response.get("sources", [])])
-            else:
-                sources = "knowledge_base"
+            sources = (
+                ", ".join(s["source"] for s in rag_response.get("sources", []))
+                if "sources" in rag_response
+                else "knowledge_base"
+            )
 
             return {
                 "answer": rag_response.get("answer", "I don't know."),
@@ -275,14 +312,12 @@ class RAGAgent:
                 "original_query": refined_query
             }
 
-
         except Exception as e:
-            print(f" [Agent Error] {e}")
+            print(f"[Agent Error] {e}")
             return {
                 "answer": "I encountered an error processing your request.",
                 "source": "error",
                 "original_query": user_query
             }
-
 
 shipcube_agent = RAGAgent()
