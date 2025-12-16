@@ -16,7 +16,10 @@ from utils.ai_model import (
 
 dotenv.load_dotenv()
 
-ORDER_ID_RE = re.compile(r"\b\d{5,15}(?:\.0)?\b")
+ORDER_ID_RE = re.compile(
+    r"(order|tracking)\s*(id|number)?\s*[:#]?\s*(\d{8,12}(?:\.0)?)",
+    re.I
+)
 
 BASIC_FIELDS = {
     "order_number",

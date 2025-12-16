@@ -72,9 +72,6 @@ def init_db():
     db = get_db()
     cur = db.cursor()
 
-    # cur.execute("""
-    # DROP TABLE IF EXISTS client_orders """)
-
     # client_orders table
     cur.execute("""
     CREATE TABLE IF NOT EXISTS client_orders (
