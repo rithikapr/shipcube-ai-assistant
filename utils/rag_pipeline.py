@@ -1,11 +1,4 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
-from utils.ai_model import generate_answer_from_retrieval
-import dotenv
 import json
-import re
-from flask import g
 import sqlite3
 from utils.ai_model import (
     classify_order_intent,
@@ -20,34 +13,13 @@ from utils.rag_model.prompts import (
     rag_answer_chain,
     small_talk_chain
 )
-
-
-dotenv.load_dotenv()
-
-ORDER_ID_RE = re.compile(
-    r"(order|tracking)\s*(id|number)?\s*[:#]?\s*(\d{9})(?:\.0)?",
-    re.I
+from config import (
+    ORDER_ID_RE,
+    BASIC_FIELDS,
+    DETAILED_FIELDS
 )
 
-BASIC_FIELDS = {
-    "order_number",
-    "order_date",
-    "carrier",
-    "shipping_method",
-    "tracking_number",
-}
 
-DETAILED_FIELDS = {
-    "to_name",
-    "zip",
-    "state",
-    "country",
-    "warehouse",
-    "tpl_customer",
-    "size_dimensions",
-    "weight_oz",
-    "final_amount",
-}
 
 
 def apply_data_policy(order: dict, intent: str) -> dict:
