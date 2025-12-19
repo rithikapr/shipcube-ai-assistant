@@ -141,7 +141,7 @@ def get_items_for_tag(tag: str, limit: int = 10) -> List[Dict]:
 # ---------------------------------------------------------------------
 # Semantic FAQ match (primary)
 # ---------------------------------------------------------------------
-def semantic_faq_match(query: str, top_k: int = 3, threshold: float = 0.66) -> Optional[Tuple[Dict, float]]:
+def semantic_faq_match(query: str, top_k: int = 3, threshold: float = 0.66):
     """
     Return best FAQ item + similarity if above threshold. Similarity is cosine in [-1,1].
     """
@@ -157,11 +157,13 @@ def semantic_faq_match(query: str, top_k: int = 3, threshold: float = 0.66) -> O
 
     sims = np.dot(_QNA_EMBEDDINGS, q_emb)  # dot product since normalized => cosine
     top_idx = np.argsort(-sims)[:top_k]
-    best_i = int(top_idx[0])
-    best_score = float(sims[best_i])
-    if best_score >= threshold:
-        return QNA[best_i], best_score
-    return None
+    results = []
+    for i in top_idx:
+        score = float(sims[i])
+        if score >= threshold:
+            results.append((QNA[i], score))
+
+    return results
 
 # ---------------------------------------------------------------------
 # Lexical fallback (rare): very conservative lexical heuristic
