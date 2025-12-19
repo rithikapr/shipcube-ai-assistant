@@ -100,17 +100,14 @@ rag_answer_template = """
     Return **VALID JSON ONLY** in the following format:
 
     {{
-        "answer": string | null, 
+        "answer": string, 
         "confidence": float, 
-        "sources": [ {{ "chunk_id": string, "relevance": float }} ], 
-        "notes": string | null 
+        "notes": string
     }}
 
     ### Field Guidelines
-    - answer: Direct answer to the question, or null if not answerable.
+    - answer: Direct answer to the question, or empty string if not answerable.
     - confidence: A number between 0.0 and 1.0 representing confidence.
-    - sources: Only include chunks actually used in the answer.
-    - relevance: How strongly that chunk supports the answer (0.0–1.0).
     - notes: Any ambiguity, assumptions, or missing information.
     """
 

@@ -3,8 +3,7 @@ import sqlite3
 from utils.ai_model import (
     classify_order_intent,
     BASIC_RESPONSE_PROMPT,
-    DETAILED_RESPONSE_PROMPT,
-    semantic_faq_match
+    DETAILED_RESPONSE_PROMPT
 )
 from utils.rag_model.llm import llm
 from utils.rag_model.prompts import (
@@ -13,11 +12,12 @@ from utils.rag_model.prompts import (
     rag_answer_chain,
     small_talk_chain
 )
-from config import (
+from utils.config import (
     ORDER_ID_RE,
     BASIC_FIELDS,
     DETAILED_FIELDS
 )
+from utils.rag_model.retrieval import vectorstore_retrieval
 
 
 
@@ -85,6 +85,7 @@ def find_order_in_db(order_token: str):
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
+
 
 """
 *   @brief Create a RAG Agent that routes queries, refines them, and retrieves answers.
@@ -221,14 +222,7 @@ class RAGAgent:
                         "original_query": user_query
                     }
 
-            data = semantic_faq_match(refined_query, top_k=3, threshold=0.7)
-            print(data)
-            retrieved_chunks = ""
-            metadata = ""
-
-            for item, score in data:
-                retrieved_chunks += f"Data_Chunk: {item['answer']} || Score: {score}\n "
-                metadata += f"Tags: {item['tag']} || Score: {score}\n "
+            retrieved_chunks, metadata = vectorstore_retrieval(refined_query, top_k=3, threshold=0.7)
 
             rag_response = self.rag_answer_chain.invoke({
                 "question": refined_query.get("query"),
@@ -239,11 +233,11 @@ class RAGAgent:
 
             sources = (
                 "faq_semantic"
-                if data else "none"
+                if retrieved_chunks else "none"
             )
 
             return {
-                "answer": rag_response.get("answer") or "I couldn't obtain valid information. Could you please detail your question?",
+                "answer": rag_response.get("answer").get('answer') or "I couldn't obtain valid information. Could you please detail your question?",
                 "source": sources,
                 "original_query": user_query
             }
