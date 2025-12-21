@@ -206,7 +206,7 @@ class RAGAgent:
                 response = self.small_talk_chain.invoke({"user_query": refined_query.get("query"), "context": refined_query.get("context")})
 
                 return {
-                    "answer": response or "Hello! How can I help you with ShipCube?",
+                    "answer": response.get('answer') or "Hello! How can I help you with ShipCube?",
                     "source": "small_talk",
                     "original_query": user_query
                 }
@@ -223,6 +223,8 @@ class RAGAgent:
                     }
 
             retrieved_chunks, metadata = vectorstore_retrieval(refined_query, top_k=3, threshold=0.7)
+            print(f"[Agent] Retrieved Chunks: {retrieved_chunks}")
+            print(f"[Agent] Metadata: {metadata}")
 
             rag_response = self.rag_answer_chain.invoke({
                 "question": refined_query.get("query"),
@@ -237,7 +239,7 @@ class RAGAgent:
             )
 
             return {
-                "answer": rag_response.get("answer").get('answer') or "I couldn't obtain valid information. Could you please detail your question?",
+                "answer": rag_response.get("answer") or "I couldn't obtain valid information. Could you please detail your question?",
                 "source": sources,
                 "original_query": user_query
             }

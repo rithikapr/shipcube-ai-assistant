@@ -43,7 +43,7 @@ router_chain = (
 
 refine_template = """
     Given a chat history and a follow-up question, summarise the history so that most important information retain, in the format you understand context.
-    Send the rephrased question along with the super summarized form of the chat history. 
+    Send the rephrased question along with the super summarized form of the chat history in less than 25 tokens. Remember to keep the context in super highly compressed form. 
     If the history is empty or irrelevant, return the question as is and context as empty string.
     
     Chat History:
