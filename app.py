@@ -457,11 +457,13 @@ def ask():
     
     effective_query = (f"[{icon}] " if icon else "") + query
     append_chat_to_history('user', effective_query, user_obj)
+    print(f"[Agent] Effective Query: {effective_query}")
 
     chat_history_str = get_session_history(user_id)
     response_data = shipcube_agent.process_query(query, chat_history_str, user_obj)
 
-    answer_text = response_data['answer']
+    answer_text = response_data.get('answer')
+    print(f"[Agent] Answer: {answer_text}")
     append_chat_to_history('assistant', answer_text, user_obj)
 
     answer_text = markdown_bold_to_html(answer_text)

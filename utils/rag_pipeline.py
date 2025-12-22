@@ -1,45 +1,25 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
-from utils.ai_model import generate_answer_from_retrieval
-import dotenv
 import json
-import re
-from flask import g
 import sqlite3
 from utils.ai_model import (
     classify_order_intent,
     BASIC_RESPONSE_PROMPT,
     DETAILED_RESPONSE_PROMPT
 )
-
-
-dotenv.load_dotenv()
-
-ORDER_ID_RE = re.compile(
-    r"(order|tracking)\s*(id|number)?\s*[:#]?\s*(\d{9})(?:\.0)?",
-    re.I
+from utils.rag_model.llm import llm
+from utils.rag_model.prompts import (
+    router_chain,
+    refine_chain,
+    rag_answer_chain,
+    small_talk_chain
 )
+from utils.config import (
+    ORDER_ID_RE,
+    BASIC_FIELDS,
+    DETAILED_FIELDS
+)
+from utils.rag_model.retrieval import vectorstore_retrieval
 
-BASIC_FIELDS = {
-    "order_number",
-    "order_date",
-    "carrier",
-    "shipping_method",
-    "tracking_number",
-}
 
-DETAILED_FIELDS = {
-    "to_name",
-    "zip",
-    "state",
-    "country",
-    "warehouse",
-    "tpl_customer",
-    "size_dimensions",
-    "weight_oz",
-    "final_amount",
-}
 
 
 def apply_data_policy(order: dict, intent: str) -> dict:
@@ -106,6 +86,7 @@ def find_order_in_db(order_token: str):
     conn.close()
     return dict(row) if row else None
 
+
 """
 *   @brief Create a RAG Agent that routes queries, refines them, and retrieves answers.
 
@@ -132,69 +113,12 @@ class RAGAgent:
     
     """
     def __init__(self):
-        self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-lite",
-            temperature=0
-        )
-        
-        router_template = """
-            You are the primary router for the ShipCube AI assistant.
-            Classify the User Input into exactly ONE of the following categories.
+        self.llm = llm
+        self.router_chain = router_chain
+        self.refine_chain = refine_chain
+        self.rag_answer_chain = rag_answer_chain
+        self.small_talk_chain = small_talk_chain
 
-            Return ONLY valid JSON. Do NOT include explanations or extra text.
-
-            1. "small_talk":
-            Greetings, compliments, casual conversation.
-            OUTPUT:
-            {{"type": "small_talk", "response": "Your friendly reply here"}}
-
-            2. "pricing":
-            Questions about costs, rates, fees, invoices, billing.
-            OUTPUT:
-            {{"type": "pricing"}}
-
-            3. "order_tracking":
-            Questions about locating orders, shipment status, tracking IDs, delivery.
-            OUTPUT:
-            {{"type": "order_tracking"}}
-
-            4. "technical":
-            Questions about ShipCube services, warehousing, logistics, facilities.
-            OUTPUT:
-            {{"type": "technical"}}
-
-            User Input: {query}
-
-            Return JSON ONLY.
-            """
-
-
-        self.router_chain = (
-            PromptTemplate.from_template(router_template) 
-            | self.llm 
-            | JsonOutputParser()
-        )
-
-        refine_template = """
-            Given a chat history and a follow-up question, rephrase the question to be standalone and specific.
-            If the history is empty or irrelevant, return the question as is.
-            
-            Chat History:
-            {chat_history}
-            
-            Follow Up Input: {question}
-            
-            Standalone Question:
-
-        """
-
-        self.refine_chain = (
-            PromptTemplate.from_template(refine_template) 
-            | self.llm 
-            | StrOutputParser()
-        )
-
-    
 
     """
     *   @brief Process the user query with context to generate an appropriate response.
@@ -213,8 +137,6 @@ class RAGAgent:
     *   @throws "I encountered an error processing your request.", if agent is not able to create a valid response.
 
     """
-
-
     def process_query(self, user_query, chat_history_str, user_obj):
         try:
             # ---------- ORDER ID DETECTION ----------
@@ -272,10 +194,19 @@ class RAGAgent:
 
             # ---------- NORMAL ROUTING ----------
             route = self.router_chain.invoke({"query": user_query})
+            refined_query = self.refine_chain.invoke({
+                "chat_history": chat_history_str,
+                "question": user_query
+            })
+            
+            print(f"[Agent] Route: {route}")
+            print(f"[Agent] Original: {user_query} | Refined: {refined_query}")
 
             if isinstance(route, dict) and route.get("type") == "small_talk":
+                response = self.small_talk_chain.invoke({"user_query": refined_query.get("query"), "context": refined_query.get("context")})
+
                 return {
-                    "answer": route.get("response", "Hello! How can I help you with ShipCube?"),
+                    "answer": response.get('answer') or "Hello! How can I help you with ShipCube?",
                     "source": "small_talk",
                     "original_query": user_query
                 }
@@ -291,25 +222,28 @@ class RAGAgent:
                         "original_query": user_query
                     }
 
-            refined_query = self.refine_chain.invoke({
-                "chat_history": chat_history_str,
-                "question": user_query
+            print(f"[Agent] Refined Query: {refined_query}")
+
+            retrieved_chunks, metadata = vectorstore_retrieval(refined_query, top_k=3, threshold=0.33)
+            print(f"[Agent] Retrieved Chunks: {retrieved_chunks}")
+            print(f"[Agent] Metadata: {metadata}")
+
+            rag_response = self.rag_answer_chain.invoke({
+                "question": refined_query.get("query"),
+                'context': refined_query.get("context"),
+                "retrieved_chunks": retrieved_chunks or "N/A",
+                "metadata": metadata or "N/A"
             })
 
-            print(f"[Agent] Original: {user_query} | Refined: {refined_query}")
-
-            rag_response = generate_answer_from_retrieval(refined_query) or {}
-
             sources = (
-                ", ".join(s["source"] for s in rag_response.get("sources", []))
-                if "sources" in rag_response
-                else "knowledge_base"
+                "faq_semantic"
+                if retrieved_chunks else "none"
             )
 
             return {
-                "answer": rag_response.get("answer", "I don't know."),
+                "answer": rag_response.get("answer") or "I couldn't obtain valid information. Could you please detail your question?",
                 "source": sources,
-                "original_query": refined_query
+                "original_query": user_query
             }
 
         except Exception as e:
