@@ -198,7 +198,7 @@ class RAGAgent:
                 "chat_history": chat_history_str,
                 "question": user_query
             })
-
+            
             print(f"[Agent] Route: {route}")
             print(f"[Agent] Original: {user_query} | Refined: {refined_query}")
 
@@ -222,7 +222,9 @@ class RAGAgent:
                         "original_query": user_query
                     }
 
-            retrieved_chunks, metadata = vectorstore_retrieval(refined_query, top_k=3, threshold=0.7)
+            print(f"[Agent] Refined Query: {refined_query}")
+
+            retrieved_chunks, metadata = vectorstore_retrieval(refined_query, top_k=3, threshold=0.33)
             print(f"[Agent] Retrieved Chunks: {retrieved_chunks}")
             print(f"[Agent] Metadata: {metadata}")
 
