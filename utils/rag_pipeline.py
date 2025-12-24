@@ -22,19 +22,24 @@ from utils.config import (
 from utils.rag_model.retrieval import vectorstore_retrieval
 from utils.rate_engine import find_best_rate
 
-def wants_detailed_rate_explanation(llm, user_query: str) -> bool:
+def wants_rate_explanation(llm, user_query: str) -> bool:
+    """
+    Returns True only if the user is explicitly asking
+    for an explanation of how the shipping rate was calculated.
+    """
     prompt = f"""
 You are an intent classifier.
 
 User query:
 "{user_query}"
 
-Decide whether the user is explicitly asking for HOW the shipping cost was calculated or WHY a carrier was chosen.
+Decide whether the user is explicitly asking for
+HOW the shipping cost was calculated or WHY a carrier was chosen.
 
 Rules:
 - Reply ONLY with TRUE or FALSE
-- TRUE only if the user wants calculation steps, formulas, or reasoning
-- FALSE if the user wants just the final price or carrier
+- TRUE only if the user wants calculation steps, reasoning, or explanation
+- FALSE otherwise
 """
     try:
         resp = llm.invoke(prompt).content.strip().upper()
@@ -42,22 +47,27 @@ Rules:
     except Exception:
         return False
 
-def is_followup_rate_explanation(llm, user_query: str) -> bool:
-    prompt = f""" You are an intent classifier.
+def build_hub_price_summary(rate_result: dict) -> str:
+    """
+    Builds a single customer-facing sentence showing
+    cheapest carrier + price for each hub.
+    """
+    parts = []
 
-User query:
-"{user_query}"
+    for hub_data in rate_result.get("per_hub_results", []):
+        hub = hub_data["hub"]
+        carrier = hub_data["best_carrier"]
+        price = hub_data["best_price"]
 
-Question:
-Is this a follow-up question asking to explain a previously mentioned shipping price?
+        parts.append(f"{carrier} from {hub} hub at ${price}")
 
-Rules:
-- Reply ONLY with TRUE or FALSE
-"""
-    try:
-        return llm.invoke(prompt).content.strip().upper() == "TRUE"
-    except Exception:
-        return False
+    joined = ", ".join(parts)
+
+    return (
+        f"For your {rate_result['effective_weight_lb']} lb package to ZIP "
+        f"{rate_result['input_zipcode']}, the cheapest options are {joined}."
+    )
+
 
 def apply_data_policy(order: dict, intent: str) -> dict:
     allowed = (
@@ -174,7 +184,6 @@ class RAGAgent:
     *   @throws "I encountered an error processing your request.", if agent is not able to create a valid response.
 
     """
-
     
     def process_query(self, user_query, chat_history_str, user_obj, last_rate_result=None):
         try:
@@ -230,131 +239,128 @@ class RAGAgent:
                     "source": "client_orders",
                     "original_query": user_query
                 }
-            # ---------- FOLLOW-UP RATE EXPLANATION ----------
-            is_followup = bool(last_rate_result) and is_followup_rate_explanation(self.llm, user_query)
-            wants_detail = wants_detailed_rate_explanation(self.llm, user_query)
-
-            # ---------- FOLLOW-UP RATE EXPLANATION (HIGHEST PRIORITY) ----------
-            if last_rate_result and (
-                wants_detailed_rate_explanation(self.llm, user_query)
-                or is_followup_rate_explanation(self.llm, user_query)
-            ):
-                response = self.llm.invoke(f"""
-                    You are ShipCube AI.
-
-                    Output ONLY the shipping calculation steps WITH VALUES.
-
-                    Rules:
-                    - No FAQ content
-                    - No generic explanations
-                    - No prose
-                    - One step per line
-                    - Use actual ZIP, weight, carrier prices
-                    - End with selected carrier and price
-
-                    DATA:
-                    {json.dumps(last_rate_result, indent=2)}
-                    """)
-
-                return {
-                    "answer": response.content,
-                    "source": "rate_engine",
-                    "original_query": user_query
-                }
-
-
-            # If follow-up intent exists but no rate context
-            if is_followup and not last_rate_result:
-                return {
-                    "answer": (
-                        "I don’t have a previous shipping calculation to explain yet. "
-                        "Please provide the ZIP code and package weight."
-                    ),
-                    "source": "rate_engine",
-                    "original_query": user_query
-                }
-            
+                       
             # ---------- RATE (ZIP + WEIGHT) DETECTION ----------
             zip_match = ZIP_RE.search(user_query)
             weight_match = WEIGHT_RE.search(user_query)
 
+            # ZIP only
+            if zip_match and not weight_match:
+                return {
+                    "answer": "Please provide the **package weight** to calculate shipping rates.",
+                    "source": "input_required",
+                    "original_query": user_query
+                }
+
+            # Weight only
+            if weight_match and not zip_match:
+                return {
+                    "answer": "Please provide the **destination ZIP code** to calculate shipping rates.",
+                    "source": "input_required",
+                    "original_query": user_query
+                }
+
             if zip_match and weight_match:
-                #  AUTH CHECK
+
                 if user_obj.get("is_guest", False):
                     return {
                         "answer": (
                             "Shipping rate estimates are available only for logged-in users.\n\n"
-                            "Please **log in** to view the best carrier and pricing."
+                            "Please **log in** to view pricing."
                         ),
                         "source": "auth_required",
                         "original_query": user_query
                     }
+
                 zipcode = int(zip_match.group())
-                weight_value = float(weight_match.group(1))
+                weight_val = float(weight_match.group(1))
                 unit = weight_match.group(2).lower()
 
-                # Convert to lbs if needed
                 if unit == "kg":
-                    weight_value = weight_value * 2.20462
+                    weight_val *= 2.20462
                 elif unit == "oz":
-                    weight_value = weight_value / 16
+                    weight_val /= 16
 
-                result = find_best_rate(zipcode, weight_value)
+                #  1. Always calculate rate
+                rate_result = find_best_rate(zipcode, weight_val)
 
-                if "error" in result:
+                if "error" in rate_result:
                     return {
-                        "answer": result["error"],
+                        "answer": rate_result["error"],
                         "source": "rate_engine",
-                        "original_query": user_query,
-                        "rate_data": result
+                        "original_query": user_query
                     }
-                #Check if user wants detailed explanation (LLM-based)
-                detailed = wants_detailed_rate_explanation(self.llm, user_query)
 
-                if detailed:
-                    # DETAILED RESPONSE (FORMULAS + LOGIC)
-                    response = self.llm.invoke(f"""
-                        You are ShipCube AI.
-                        Output shipping calculation formulas ONLY.
-                        STRICT FORMAT:
-                        1) effective weight lb = ceil(<input_weight>) = <value>
-                        2) zip3 = first_3_digits(<zip>) = <value>
-                        3) <carrier>_price = <value>   (one line per carrier)
-                        4) selected_price = min(<prices>) = <value>
-                        5) selected_carrier = <carrier_name>
+                #  2. CHECK IF EXPLANATION IS EXPLICITLY ASKED
+                explain_requested = wants_rate_explanation(self.llm, user_query)
 
-                        Rules:
-                        - Use numbered lines ONLY
-                        - One formula per line
-                        - Do NOT merge lines
-                        - Do NOT explain in sentences
-                        - Use actual numeric values
+                if explain_requested:
+                    explanation = self.llm.invoke(f"""
+            You are ShipCube AI.
 
-                        DATA:
-                        {json.dumps(result, indent=2)}
-                        """)
-                else:
-                    #  SIMPLE ONE-LINE RESPONSE
-                    response = self.llm.invoke(f"""
-                You are ShipCube AI, a logistics support assistant.
+            Explain how the shipping rate was calculated in clear, customer-friendly sentences.
 
-                Write ONE concise customer-facing sentence:
-                - State the cheapest carrier and final price
-                - Mention ZIP code and package weight
-                - Do NOT explain calculations
-                - Do NOT provide multiple options
+            Strict rules:
+            - Use the per_hub_results field from the data
+            - Explain pricing for EACH hub present
+            - Do NOT skip any hub
+            - After explaining each hub, explain how the final rate was selected
+            - No formulas
+            - No JSON
+            - No bullet points
+            - Do NOT invent data
 
-                Shipping rate data:
-                {json.dumps(result, indent=2)}
-                """)
+            DATA:
+            {json.dumps(rate_result, indent=2)}
+            """)
+
+                    return {
+                        "answer": explanation.content,
+                        "source": "rate_engine",
+                        "original_query": user_query
+                    }
+
+                #  3. DEFAULT  ONE-LINE SUMMARY ONLY
+                summary_sentence = build_hub_price_summary(rate_result)
+
+                user_obj["last_rate_result"] = rate_result
 
                 return {
-                    "answer": response.content,
+                    "answer": summary_sentence,
                     "source": "rate_engine",
                     "original_query": user_query,
-                    "rate_data": result
-
+                    "rate_data": rate_result
                 }
+            
+            # ---------- FOLLOW-UP RATE EXPLANATION (NO ZIP/WEIGHT IN QUERY) ----------
+            if wants_rate_explanation(self.llm, user_query):
+                last_rate = user_obj.get("last_rate_result")
+
+                if last_rate:
+                    explanation = self.llm.invoke(f"""
+            You are ShipCube AI.
+
+            Explain how the shipping rate was calculated in clear, customer-friendly sentences.
+
+            Strict rules:
+            - Use the per_hub_results field from the data
+            - Explain pricing for EACH hub present
+            - Do NOT skip any hub
+            - After explaining each hub, explain how the final rate was selected
+            - No formulas
+            - No JSON
+            - No bullet points
+            - Do NOT invent data
+
+            DATA:
+            {json.dumps(last_rate, indent=2)}
+            """)
+
+                    return {
+                        "answer": explanation.content,
+                        "source": "rate_engine",
+                        "original_query": user_query
+                    }
 
             # ---------- NORMAL ROUTING ----------
             route = self.router_chain.invoke({"query": user_query})
