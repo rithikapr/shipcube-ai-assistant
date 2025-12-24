@@ -15,11 +15,58 @@ from utils.rag_model.prompts import (
 from utils.config import (
     ORDER_ID_RE,
     BASIC_FIELDS,
-    DETAILED_FIELDS
+    DETAILED_FIELDS,
+    ZIP_RE,
+    WEIGHT_RE
 )
 from utils.rag_model.retrieval import vectorstore_retrieval
+from utils.rate_engine import find_best_rate
 
+def wants_rate_explanation(llm, user_query: str) -> bool:
+    """
+    Returns True only if the user is explicitly asking
+    for an explanation of how the shipping rate was calculated.
+    """
+    prompt = f"""
+You are an intent classifier.
 
+User query:
+"{user_query}"
+
+Decide whether the user is explicitly asking for
+HOW the shipping cost was calculated or WHY a carrier was chosen.
+
+Rules:
+- Reply ONLY with TRUE or FALSE
+- TRUE only if the user wants calculation steps, reasoning, or explanation
+- FALSE otherwise
+"""
+    try:
+        resp = llm.invoke(prompt).content.strip().upper()
+        return resp == "TRUE"
+    except Exception:
+        return False
+
+def build_hub_price_summary(rate_result: dict) -> str:
+    """
+    Builds a single customer-facing sentence showing
+    cheapest carrier + price for each hub.
+    """
+    parts = []
+
+    for hub_data in rate_result.get("per_hub_results", []):
+        hub = hub_data["hub"]
+        carrier = hub_data["best_carrier"]
+        price = hub_data["best_price"]
+
+        parts.append(f"{carrier} from {hub} hub at ${price}")
+
+    joined = ", ".join(parts)
+
+    return (
+        f"For your {rate_result['effective_weight_lb']} lb package to ZIP "
+        f"{rate_result['input_zipcode']}, the cheapest options are {joined}."
+    )
 
 
 def apply_data_policy(order: dict, intent: str) -> dict:
@@ -137,7 +184,8 @@ class RAGAgent:
     *   @throws "I encountered an error processing your request.", if agent is not able to create a valid response.
 
     """
-    def process_query(self, user_query, chat_history_str, user_obj):
+    
+    def process_query(self, user_query, chat_history_str, user_obj, last_rate_result=None):
         try:
             # ---------- ORDER ID DETECTION ----------
             order_match = ORDER_ID_RE.search(user_query)
@@ -191,6 +239,128 @@ class RAGAgent:
                     "source": "client_orders",
                     "original_query": user_query
                 }
+                       
+            # ---------- RATE (ZIP + WEIGHT) DETECTION ----------
+            zip_match = ZIP_RE.search(user_query)
+            weight_match = WEIGHT_RE.search(user_query)
+
+            # ZIP only
+            if zip_match and not weight_match:
+                return {
+                    "answer": "Please provide the **package weight** to calculate shipping rates.",
+                    "source": "input_required",
+                    "original_query": user_query
+                }
+
+            # Weight only
+            if weight_match and not zip_match:
+                return {
+                    "answer": "Please provide the **destination ZIP code** to calculate shipping rates.",
+                    "source": "input_required",
+                    "original_query": user_query
+                }
+
+            if zip_match and weight_match:
+
+                if user_obj.get("is_guest", False):
+                    return {
+                        "answer": (
+                            "Shipping rate estimates are available only for logged-in users.\n\n"
+                            "Please **log in** to view pricing."
+                        ),
+                        "source": "auth_required",
+                        "original_query": user_query
+                    }
+
+                zipcode = int(zip_match.group())
+                weight_val = float(weight_match.group(1))
+                unit = weight_match.group(2).lower()
+
+                if unit == "kg":
+                    weight_val *= 2.20462
+                elif unit == "oz":
+                    weight_val /= 16
+
+                #  1. Always calculate rate
+                rate_result = find_best_rate(zipcode, weight_val)
+
+                if "error" in rate_result:
+                    return {
+                        "answer": rate_result["error"],
+                        "source": "rate_engine",
+                        "original_query": user_query
+                    }
+
+                #  2. CHECK IF EXPLANATION IS EXPLICITLY ASKED
+                explain_requested = wants_rate_explanation(self.llm, user_query)
+
+                if explain_requested:
+                    explanation = self.llm.invoke(f"""
+            You are ShipCube AI.
+
+            Explain how the shipping rate was calculated in clear, customer-friendly sentences.
+
+            Strict rules:
+            - Use the per_hub_results field from the data
+            - Explain pricing for EACH hub present
+            - Do NOT skip any hub
+            - After explaining each hub, explain how the final rate was selected
+            - No formulas
+            - No JSON
+            - No bullet points
+            - Do NOT invent data
+
+            DATA:
+            {json.dumps(rate_result, indent=2)}
+            """)
+
+                    return {
+                        "answer": explanation.content,
+                        "source": "rate_engine",
+                        "original_query": user_query
+                    }
+
+                #  3. DEFAULT  ONE-LINE SUMMARY ONLY
+                summary_sentence = build_hub_price_summary(rate_result)
+
+                user_obj["last_rate_result"] = rate_result
+
+                return {
+                    "answer": summary_sentence,
+                    "source": "rate_engine",
+                    "original_query": user_query,
+                    "rate_data": rate_result
+                }
+            
+            # ---------- FOLLOW-UP RATE EXPLANATION (NO ZIP/WEIGHT IN QUERY) ----------
+            if wants_rate_explanation(self.llm, user_query):
+                last_rate = user_obj.get("last_rate_result")
+
+                if last_rate:
+                    explanation = self.llm.invoke(f"""
+            You are ShipCube AI.
+
+            Explain how the shipping rate was calculated in clear, customer-friendly sentences.
+
+            Strict rules:
+            - Use the per_hub_results field from the data
+            - Explain pricing for EACH hub present
+            - Do NOT skip any hub
+            - After explaining each hub, explain how the final rate was selected
+            - No formulas
+            - No JSON
+            - No bullet points
+            - Do NOT invent data
+
+            DATA:
+            {json.dumps(last_rate, indent=2)}
+            """)
+
+                    return {
+                        "answer": explanation.content,
+                        "source": "rate_engine",
+                        "original_query": user_query
+                    }
 
             # ---------- NORMAL ROUTING ----------
             route = self.router_chain.invoke({"query": user_query})

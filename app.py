@@ -460,7 +460,16 @@ def ask():
     print(f"[Agent] Effective Query: {effective_query}")
 
     chat_history_str = get_session_history(user_id)
-    response_data = shipcube_agent.process_query(query, chat_history_str, user_obj)
+    last_rate_result = session.get("last_rate_result")
+    response_data = shipcube_agent.process_query(
+        query,
+        chat_history_str,
+        user_obj,
+        last_rate_result=last_rate_result
+    )
+    # Store latest rate result
+    if response_data.get("source") == "rate_engine" and response_data.get("rate_data"):
+        session["last_rate_result"] = response_data["rate_data"]
 
     answer_text = response_data.get('answer')
     print(f"[Agent] Answer: {answer_text}")
@@ -519,37 +528,6 @@ def invoice():
 
     # TODO: placeholder – implement invoice download logic later
     return render_template('invoice.html', user=user)
-
-
-def get_session_history(user_id, limit=10):
-    """
-        Fetches the last 'limit' messages for a specific user_id and formats them as a string for the AI model.
-
-    """
-
-    conn = sqlite3.connect('data/shipcube.db')
-    cursor = conn.cursor()
-    
-    query = """
-        SELECT role, message 
-        FROM chats 
-        WHERE user_id = ? 
-        ORDER BY ts DESC 
-        LIMIT ?
-    """
-    cursor.execute(query, (user_id, limit))
-    rows = cursor.fetchall()
-    conn.close()
-    
-    rows = rows[::-1]
-    
-    formatted_history = []
-    for role, msg in rows:
-        display_role = "Human" if role == "user" else "AI"
-        formatted_history.append(f"{display_role}: {msg}")
-        
-    return "\n".join(formatted_history)
-
 
 
 if __name__ == '__main__':
