@@ -25,3 +25,9 @@ DETAILED_FIELDS = {
     "weight_oz",
     "final_amount",
 }
+
+ZIP_RE = re.compile(r"\b\d{5}\b")
+WEIGHT_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(kg|kgs|kilograms|lb|lbs|pounds|oz|ounces)",
+    re.I
+)
