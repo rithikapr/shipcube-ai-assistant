@@ -19,7 +19,13 @@ from utils.config import (
     ZIP_RE,
     WEIGHT_RE
 )
-from utils.rag_model.retrieval import vectorstore_retrieval
+from utils.rag_model.retrieval import (
+    vectorstore_retrieval,
+    get_user_intent,
+    get_refined_query,
+    get_rag_answer,
+    small_talk_response
+)
 from utils.rate_engine import find_best_rate
 
 def wants_rate_explanation(llm, user_query: str) -> bool:
@@ -363,25 +369,22 @@ class RAGAgent:
                     }
 
             # ---------- NORMAL ROUTING ----------
-            route = self.router_chain.invoke({"query": user_query})
-            refined_query = self.refine_chain.invoke({
-                "chat_history": chat_history_str,
-                "question": user_query
-            })
-            
-            print(f"[Agent] Route: {route}")
-            print(f"[Agent] Original: {user_query} | Refined: {refined_query}")
+            route = get_user_intent(user_query)
+            refined_query = get_refined_query(chat_history_str, user_query)
 
-            if isinstance(route, dict) and route.get("type") == "small_talk":
-                response = self.small_talk_chain.invoke({"user_query": refined_query.get("query"), "context": refined_query.get("context")})
+            # print(f"[Agent] Route: {route}")
+            # print(f"[Agent] Original: {user_query} | Refined: {refined_query}")
+
+            if route == "small_talk":
+                response = small_talk_response(refined_query)
 
                 return {
-                    "answer": response.get('answer') or "Hello! How can I help you with ShipCube?",
+                    "answer": response or "Hello! How can I help you with ShipCube?",
                     "source": "small_talk",
                     "original_query": user_query
                 }
 
-            if isinstance(route, dict) and route.get("type") == "pricing":
+            if route == "pricing":
                 if user_obj.get("is_guest", False):
                     return {
                         "answer": (
@@ -392,18 +395,13 @@ class RAGAgent:
                         "original_query": user_query
                     }
 
-            print(f"[Agent] Refined Query: {refined_query}")
+            # print(f"[Agent] Refined Query: {refined_query}")
 
             retrieved_chunks, metadata = vectorstore_retrieval(refined_query, top_k=3, threshold=0.33)
-            print(f"[Agent] Retrieved Chunks: {retrieved_chunks}")
-            print(f"[Agent] Metadata: {metadata}")
+            # print(f"[Agent] Retrieved Chunks: {retrieved_chunks}")
+            # print(f"[Agent] Metadata: {metadata}")
 
-            rag_response = self.rag_answer_chain.invoke({
-                "question": refined_query.get("query"),
-                'context': refined_query.get("context"),
-                "retrieved_chunks": retrieved_chunks or "N/A",
-                "metadata": metadata or "N/A"
-            })
+            rag_response = get_rag_answer(refined_query, retrieved_chunks, metadata)
 
             sources = (
                 "faq_semantic"
